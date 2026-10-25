@@ -20,7 +20,7 @@ const PLATFORM = "platform-token-abcdefgh";
 function configFor(otaPort: number): BridgeConfig {
   return {
     otaPort,
-    wsPort: 8000,
+    wsPort: 8001,
     publicHost: "127.0.0.1",
     deviceSecret: SECRET,
     allowedDevices: ["b81f3f4a9b01"],
@@ -70,7 +70,7 @@ describe("the OTA endpoint", () => {
         websocket: { url: string; token: string; version: number };
         server_time: { timestamp: number; timezone_offset: number };
       };
-      assert.equal(body.websocket.url, "ws://127.0.0.1:8000/xiaozhi/v1/");
+      assert.equal(body.websocket.url, "ws://127.0.0.1:8001/xiaozhi/v1/");
       assert.equal(body.websocket.token, deriveToken(SECRET, BOARD), "the token issued is the one the socket will accept");
       assert.equal(body.websocket.version, 3, "the framing version the device must use comes from here");
       assert.ok(

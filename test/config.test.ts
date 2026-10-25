@@ -297,7 +297,7 @@ describe("the rest of the configuration", () => {
   it("keeps the values that were already settled", () => {
     const config = loadConfig(minimal);
     assert.equal(config.otaPort, 8003);
-    assert.equal(config.wsPort, 8000);
+    assert.equal(config.wsPort, 8001);
     assert.equal(config.framing, 3);
     assert.equal(config.serverRate, 24000);
     assert.equal(config.frameMs, 60);

@@ -708,7 +708,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
 
   return {
     otaPort: readInt(env, "OTA_PORT", 8003, PORT_MAX),
-    wsPort: readInt(env, "WS_PORT", 8000, PORT_MAX),
+    wsPort: readInt(env, "WS_PORT", 8001, PORT_MAX),
     publicHost: localIp(env.BRIDGE_PUBLIC_HOST),
     deviceSecret: readDeviceSecret(env),
     allowedDevices,

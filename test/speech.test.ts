@@ -27,7 +27,7 @@ const DRAIN_GUARD_MS = ENDPOINTER_DEFAULTS.drainGuardMs;
 
 const config: BridgeConfig = {
   otaPort: 8003,
-  wsPort: 8000,
+  wsPort: 8001,
   publicHost: "127.0.0.1",
   deviceSecret: "s".repeat(43),
   allowedDevices: [],

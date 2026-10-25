@@ -38,7 +38,7 @@ address — see [Credentials](#credentials) and
 ```
 adaptive-interview-bridge
   ota      http://192.168.1.100:8003/xiaozhi/ota/
-  ws       ws://192.168.1.100:8000/xiaozhi/v1/
+  ws       ws://192.168.1.100:8001/xiaozhi/v1/
   framing  v3
   downlink 24000 Hz / 60 ms
   devices  1 allowed, 1 bound
@@ -62,7 +62,7 @@ answers even while the rest of the service is unfinished — but only to a devic
 the allowlist names; see [Credentials](#credentials). `GET /` returns the same
 addresses as text, for a human with a browser.
 
-**WebSocket — `ws://<host>:8000/xiaozhi/v1/`.** Any path is accepted; the
+**WebSocket — `ws://<host>:8001/xiaozhi/v1/`.** Any path is accepted; the
 firmware appends a version segment. On connect the device sends a `hello`, and
 the reply must carry `transport` — without it the firmware fails the connect ten
 seconds later, with nothing logged on this side. Binary frames are counted and
@@ -380,7 +380,7 @@ stamp as every line in its log.
 | | |
 | --- | --- |
 | Board | ESP32-S3-WROOM-1 N16R8, board type `bread-compact-wifi-lcd` (`docs/hardware.md`) |
-| Network | device on Wi-Fi at `192.168.1.50` → the bridge at `192.168.1.100:8001`, one LAN; bridge → the platform at `127.0.0.1:4000`. This deployment's `.env` sets `WS_PORT`, and `8001` is what it chose — the banner above and the address section are the default `8000` |
+| Network | device on Wi-Fi at `192.168.1.50` → the bridge at `192.168.1.100:8001`, one LAN; bridge → the platform at `127.0.0.1:4000`. `8001` is the default `WS_PORT`, so nothing has to be set to get it |
 | Model | `deepseek-v4.1-flash:cloud` through Ollama — a cloud model, so the reply leg leaves this machine |
 | Speech in | `stt` on audiocpp |
 | Speech out | Vietnamese, through the engine that board is bound to in `BRIDGE_DEVICE_ENGINES` — Supertonic at the time of this measurement — voice `example_m2` (`SUPERTONIC_VOICE_VIETNAMESE`); English resolves `M1` |
