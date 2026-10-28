@@ -4,7 +4,7 @@ import { once } from "node:events";
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import { ENDPOINTER_DEFAULTS, MUSIC_GAIN_DB_DEFAULT, type BridgeConfig } from "../src/config.js";
+import type { RuntimeTarget } from "../src/platform.js";
 import type { McpTool } from "../src/protocol/mcp.js";
 import { musicTools } from "../src/music.js";
 import {
@@ -34,30 +34,10 @@ import {
  */
 const PLATFORM = "platform-token-abcdefgh";
 
-function configFor(platformUrl: string): BridgeConfig {
-  return {
-    otaPort: 0,
-    wsPort: 0,
-    publicHost: "127.0.0.1",
-    deviceSecret: "s".repeat(43),
-    allowedDevices: ["b81f3f4a9b01"],
-    devicePersonas: new Map([["b81f3f4a9b01", "interview-coach"]]),
-    platformUrl,
-    apiAuthToken: PLATFORM,
-    framing: 3,
-    serverRate: 24000,
-    frameMs: 60,
-    ...ENDPOINTER_DEFAULTS,
-    sessionIdleMs: 60000,
-    musicDir: "",
-    musicGainDb: MUSIC_GAIN_DB_DEFAULT,
-    historyTurns: 20,
-    commandStep: 10,
-    deviceLanguages: new Map([["b81f3f4a9b01", "english"]]),
-    deviceEngines: new Map([["b81f3f4a9b01", "supertonic"]]),
-    devicePartners: new Map(),
-    handoverMs: 400,
-  };
+/** The runtime a turn is sent to: what used to be the deployment's platform address
+ *  and credential, now the agent's. */
+function runtimeFor(baseUrl: string): RuntimeTarget {
+  return { baseUrl, token: PLATFORM };
 }
 
 interface StubRequest {
@@ -258,6 +238,29 @@ describe("the turn request", () => {
     assert.equal(form.get("enabledTopics"), null, "no topics is a turn that searches nothing");
   });
 
+  it("carries the account's model when the agent names one", () => {
+    const form = turnForm({
+      ...REQUEST,
+      llm: {
+        baseUrl: "https://api.openai.com/v1",
+        model: "gpt-4o-mini",
+        apiKey: "sk-live-abc123",
+        temperature: 0.4,
+      },
+    });
+    assert.equal(form.get("llmBaseUrl"), "https://api.openai.com/v1");
+    assert.equal(form.get("llmModel"), "gpt-4o-mini");
+    assert.equal(form.get("llmApiKey"), "sk-live-abc123");
+    assert.equal(form.get("llmTemperature"), "0.4");
+  });
+
+  it("omits every model field when the agent names none", () => {
+    const form = turnForm(REQUEST);
+    for (const field of ["llmBaseUrl", "llmModel", "llmApiKey", "llmTemperature"]) {
+      assert.equal(form.get(field), null, field);
+    }
+  });
+
   it("sends the audio file when the turn has one, and no text", () => {
     const form = turnForm({
       ...REQUEST,
@@ -273,7 +276,7 @@ describe("the turn request", () => {
   it("is posted as multipart with the platform's credential and nothing else", async () => {
     const platform = await stubPlatform(streamSse([["done", { fullText: "ok" }]]));
     try {
-      await runTurn(configFor(platform.url), REQUEST, {});
+      await runTurn(runtimeFor(platform.url), REQUEST, {});
       const [seen] = platform.requests;
       assert.equal(seen.path, "/api/voice-agent/stream");
       assert.equal(seen.authorization, `Bearer ${PLATFORM}`);
@@ -304,7 +307,7 @@ describe("reading the reply's stream", () => {
     );
     try {
       const { sink, log, sentences } = recordingSink();
-      const outcome = await runTurn(configFor(platform.url), REQUEST, sink);
+      const outcome = await runTurn(runtimeFor(platform.url), REQUEST, sink);
 
       assert.deepEqual(log, [
         "user:hôm nay thế nào",
@@ -338,7 +341,7 @@ describe("reading the reply's stream", () => {
     );
     try {
       const { sink, sentences } = recordingSink();
-      await runTurn(configFor(platform.url), REQUEST, sink);
+      await runTurn(runtimeFor(platform.url), REQUEST, sink);
 
       assert.equal(sentences[0].text, null, "whitespace names nothing");
       assert.equal(sentences[1].text, null, "and neither does an empty text");
@@ -367,7 +370,7 @@ describe("reading the reply's stream", () => {
     });
     try {
       const { sink, log } = recordingSink();
-      const outcome = await runTurn(configFor(platform.url), REQUEST, sink);
+      const outcome = await runTurn(runtimeFor(platform.url), REQUEST, sink);
       assert.deepEqual(log, ["user:xin chào"]);
       assert.equal(outcome.replyText, "Chào bạn.");
     } finally {
@@ -385,7 +388,7 @@ describe("reading the reply's stream", () => {
     });
     try {
       const { sink, log } = recordingSink();
-      const outcome = await runTurn(configFor(platform.url), REQUEST, sink);
+      const outcome = await runTurn(runtimeFor(platform.url), REQUEST, sink);
       assert.deepEqual(log, [], "neither a comment nor an unmodelled event is the sink's business");
       assert.equal(outcome.replyText, "ok");
     } finally {
@@ -405,7 +408,7 @@ describe("reading the reply's stream", () => {
     );
     try {
       const order: string[] = [];
-      await runTurn(configFor(platform.url), REQUEST, {
+      await runTurn(runtimeFor(platform.url), REQUEST, {
         onSentence: async (sentence) => {
           order.push(`begin:${sentence.index}`);
           await new Promise((resolve) => setTimeout(resolve, 10));
@@ -426,7 +429,7 @@ describe("reading the reply's stream", () => {
     });
     try {
       const { sink } = recordingSink();
-      const outcome = await runTurn(configFor(platform.url), REQUEST, sink);
+      const outcome = await runTurn(runtimeFor(platform.url), REQUEST, sink);
       assert.equal(outcome.replyText, "half an answer");
       assert.equal(outcome.settled, false, "a cut-off turn and a finished one are not the same thing");
     } finally {
@@ -448,7 +451,7 @@ describe("reading the reply's stream", () => {
     });
     try {
       const { sink } = recordingSink();
-      const outcome = await runTurn(configFor(platform.url), REQUEST, sink);
+      const outcome = await runTurn(runtimeFor(platform.url), REQUEST, sink);
       assert.equal(outcome.replyText, "một hai ba và bốn");
       assert.equal(outcome.settled, false, "there was still no done event");
     } finally {
@@ -466,7 +469,7 @@ describe("when the platform refuses the turn", () => {
     );
     try {
       const { sink, log } = recordingSink();
-      const outcome = await runTurn(configFor(platform.url), REQUEST, sink);
+      const outcome = await runTurn(runtimeFor(platform.url), REQUEST, sink);
       assert.deepEqual(log, ["error:systemPrompt is required"]);
       assert.equal(outcome.settled, true);
       assert.equal(outcome.replyText, "");
@@ -481,7 +484,7 @@ describe("when the platform refuses the turn", () => {
     );
     try {
       const { sink, log } = recordingSink();
-      const outcome = await runTurn(configFor(platform.url), REQUEST, sink);
+      const outcome = await runTurn(runtimeFor(platform.url), REQUEST, sink);
       assert.deepEqual(log, ["notice:no_speech:No speech detected. Please try again."]);
       assert.equal(outcome.settled, true);
     } finally {
@@ -496,7 +499,7 @@ describe("when the platform refuses the turn", () => {
     });
     try {
       await assert.rejects(
-        () => runTurn(configFor(platform.url), REQUEST, {}),
+        () => runTurn(runtimeFor(platform.url), REQUEST, {}),
         (error: Error) => {
           assert.match(error.message, /401/);
           assert.ok(
@@ -531,7 +534,7 @@ describe("aborting a turn", () => {
       const controller = new AbortController();
       const seen: number[] = [];
       const outcome = await runTurn(
-        configFor(platform.url),
+        runtimeFor(platform.url),
         REQUEST,
         {
           onSentence: (sentence) => {

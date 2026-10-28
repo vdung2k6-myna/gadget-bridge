@@ -89,11 +89,9 @@ function configFor(options: { commandStep?: number } = {}): BridgeConfig {
     otaPort: 0,
     wsPort: 0,
     publicHost: "127.0.0.1",
-    deviceSecret: "s".repeat(43),
-    allowedDevices: [],
-    devicePersonas: new Map(),
-    platformUrl: "http://unused",
-    apiAuthToken: "token",
+    consoleUrl: "http://127.0.0.1:3001",
+    consoleToken: "console-token-abcdefgh",
+    registryTtlMs: 60_000,
     framing: 3,
     serverRate: 24000,
     frameMs: 60,
@@ -103,9 +101,6 @@ function configFor(options: { commandStep?: number } = {}): BridgeConfig {
     musicGainDb: MUSIC_GAIN_DB_DEFAULT,
     historyTurns: 20,
     commandStep: options.commandStep ?? 10,
-    deviceLanguages: new Map(),
-    deviceEngines: new Map(),
-    devicePartners: new Map(),
     handoverMs: 400,
   };
 }
@@ -117,7 +112,12 @@ function configFor(options: { commandStep?: number } = {}): BridgeConfig {
  * about; the one case where an answer never comes is a device that answers nothing,
  * and the deadline is injected short for it.
  */
-function gadget(answers: (request: Request) => unknown, tools: unknown[] = [STATUS_TOOL], config = configFor()) {
+function gadget(
+  answers: (request: Request) => unknown,
+  tools: unknown[] = [STATUS_TOOL],
+  config = configFor(),
+  options: { onCatalogue?: (tools: readonly { name: string; description: string }[]) => void } = {}
+) {
   const sent: Frame[] = [];
   let client: ReturnType<typeof createGadget> | null = null;
 
@@ -140,7 +140,7 @@ function gadget(answers: (request: Request) => unknown, tools: unknown[] = [STAT
     },
   };
 
-  client = createGadget(socket, config, "s1", { replyTimeoutMs: 50 });
+  client = createGadget(socket, config, "s1", { replyTimeoutMs: 50, ...options });
   return { socket, sent, gadget: client, methods: () => sent.map((frame) => frame.payload.method) };
 }
 
@@ -259,6 +259,24 @@ describe("what the gadget reported about itself", () => {
     assert.equal(readStatus("null"), null);
     assert.equal(readStatus("{}"), null, "a report with nothing in it is nothing to say");
     assert.equal(readStatus(JSON.stringify({ screen: { brightness: "high" } })), null, "a value of the wrong type is no value");
+  });
+});
+
+describe("what the gadget says it can do", () => {
+  it("reports the catalogue it read, an empty one included", async () => {
+    const seen: string[][] = [];
+    const one = gadget(() => undefined, [STATUS_TOOL], configFor(), {
+      onCatalogue: (tools) => seen.push(tools.map((tool) => tool.name)),
+    });
+    await one.gadget.start();
+    assert.deepEqual(seen[0], ["self.get_device_status"]);
+
+    const noneSeen: string[][] = [];
+    const none = gadget(() => undefined, [], configFor(), {
+      onCatalogue: (tools) => noneSeen.push(tools.map((tool) => tool.name)),
+    });
+    await none.gadget.start();
+    assert.deepEqual(noneSeen, [[]], "a gadget that declares nothing still reports that");
   });
 });
 

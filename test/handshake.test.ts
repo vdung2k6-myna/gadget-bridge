@@ -5,8 +5,8 @@ import type { AddressInfo } from "node:net";
 import { WebSocket } from "ws";
 import { ENDPOINTER_DEFAULTS, MUSIC_GAIN_DB_DEFAULT, type BridgeConfig } from "../src/config.js";
 import { createConversations } from "../src/conversation.js";
-import { deriveToken } from "../src/credentials.js";
-import { createPersonaCatalog } from "../src/personas.js";
+import { deriveToken, normalizeDeviceId } from "../src/credentials.js";
+import type { Gadget, Registry } from "../src/registry.js";
 import { createWsServer } from "../src/server/ws.js";
 
 /**
@@ -30,15 +30,10 @@ const config: BridgeConfig = {
   otaPort: 0,
   wsPort: 0,
   publicHost: "127.0.0.1",
-  deviceSecret: SECRET,
-  allowedDevices: ["b81f3f4a9b01", "b81f3f4a9b02"],
+  consoleUrl: "http://127.0.0.1:3001",
+  consoleToken: "console-token-abcdefgh",
+  registryTtlMs: 60_000,
   // Both allowed devices are bound, one persona each (3.2).
-  devicePersonas: new Map([
-    ["b81f3f4a9b01", "language-partner"],
-    ["b81f3f4a9b02", "debate-partner"],
-  ]),
-  platformUrl: "http://127.0.0.1:4000",
-  apiAuthToken: PLATFORM,
   framing: 3,
   serverRate: 24000,
   frameMs: 60,
@@ -48,9 +43,6 @@ const config: BridgeConfig = {
   musicGainDb: MUSIC_GAIN_DB_DEFAULT,
   historyTurns: 20,
   commandStep: 10,
-  deviceLanguages: new Map([["b81f3f4a9b01", "english"]]),
-  deviceEngines: new Map([["b81f3f4a9b01", "supertonic"]]),
-  devicePartners: new Map(),
   handoverMs: 400,
 };
 
@@ -63,13 +55,37 @@ const deviceHello = {
   features: { mcp: false },
 };
 
-// A catalog that was never refreshed, and a conversation nobody has spoken into.
-// Neither is reached here: these tests assert the handshake, and a turn now comes
-// only from speech the device streams, which none of them sends.
-const services = { catalog: createPersonaCatalog(config), conversations: createConversations(config) };
+/**
+ * A registry that resolves any identifier to the same gadget. These tests are
+ * about the upgrade and the hello, not about who owns a device — that is the
+ * console's, and it is asked in the test that makes the registry fail.
+ */
+function fakeRegistry(fail: boolean = false): Registry {
+  return {
+    resolve: async (deviceId): Promise<Gadget> => {
+      if (fail) throw new Error("the console could not be reached");
+      return {
+        deviceId: normalizeDeviceId(deviceId),
+        owned: true,
+        secret: SECRET,
+        agent: null,
+        partner: null,
+        turns: [],
+        firmware: null,
+      };
+    },
+    reportTools: () => {},
+    reportHardware: () => {},
+    activate: async () => "owned",
+    recordTurn: () => {},
+    forget: () => {},
+  };
+}
 
-async function startedServer() {
-  const wss = createWsServer(config, services);
+const services = { registry: fakeRegistry(), conversations: createConversations(config) };
+
+async function startedServer(overrides: Partial<typeof services> = {}) {
+  const wss = createWsServer(config, { ...services, ...overrides });
   if (!wss.address()) await once(wss, "listening");
   return {
     wss,
@@ -156,15 +172,16 @@ describe("the device credential", () => {
     }
   });
 
-  it("refuses a device the allowlist does not name", async () => {
-    const { port, stop } = await startedServer();
+  it("refuses a connection the console cannot resolve", async () => {
+    // A gadget the console has not resolved is not served: unreachable is a
+    // refusal, and a service error rather than a credential one.
+    const { port, stop } = await startedServer({ registry: fakeRegistry(true) });
     try {
-      const stranger = "aa:bb:cc:dd:ee:ff";
       const { ws, status } = await attempt(port, {
-        authorization: `Bearer ${deriveToken(SECRET, stranger)}`,
-        "device-id": stranger,
+        authorization: `Bearer ${deriveToken(SECRET, BOARD)}`,
+        "device-id": BOARD,
       });
-      assert.equal(status, 401);
+      assert.equal(status, 503);
       ws.terminate();
     } finally {
       stop();

@@ -1,6 +1,6 @@
-import type { BridgeConfig } from "./config.js";
-import { platformAuthHeaders } from "./platform.js";
-import type { AnswerMode } from "./personas.js";
+import { runtimeAuthHeaders, type RuntimeTarget } from "./platform.js";
+
+export type AnswerMode = "generate" | "material";
 import { warn } from "./log.js";
 
 /**
@@ -49,8 +49,6 @@ export type TurnEngine = "kokoro" | "piper" | "supertonic";
  * `"generate" | "material"` and folds anything else to `"generate"`, so this is
  * the same vocabulary `parseCatalog` validates, carried through unchanged.
  */
-export type { AnswerMode };
-
 /**
  * A tool a turn carries, which is what the model is given and nothing more.
  *
@@ -75,6 +73,18 @@ export interface TurnAudio {
   filename: string;
   contentType: string;
   data: Buffer;
+}
+
+/**
+ * The account's own model, carried from the console through the bridge. Absent
+ * means the runtime's default, and the request is then exactly what it was
+ * before this existed.
+ */
+export interface RuntimeLlm {
+  baseUrl: string;
+  model: string;
+  apiKey: string;
+  temperature: number | null;
 }
 
 export interface TurnRequest {
@@ -107,6 +117,8 @@ export interface TurnRequest {
    */
   engine: TurnEngine;
   history: readonly TurnMessage[];
+  /** The model that answers this turn, or absent for the runtime's own. */
+  llm?: RuntimeLlm;
   /**
    * What this turn may be asked to do, exactly as it was reported: the gadget's own catalogue,
    * and beside it whatever tools the bridge answers for itself. The platform's model decides
@@ -200,6 +212,18 @@ export interface TurnOutcome {
   settled: boolean;
 }
 
+/**
+ * Why a turn was aborted, when the reason is not the person's.
+ *
+ * Two callers cancel a turn, and they mean different things by it. The gadget's wake
+ * word cancels a turn the person is interrupting, and what the turn had produced was
+ * at least partly heard. A socket closing cancels a turn whose only listener has gone,
+ * and nothing of it can have been heard. The record keeps different halves of the two
+ * (`conversation.ts`), so the reason travels on the signal rather than being inferred
+ * at the far end.
+ */
+export const DEVICE_GONE = Symbol.for("gadget-bridge.device-gone");
+
 /** The form the endpoint accepts, exactly as the browser builds it. */
 export function turnForm(request: TurnRequest): FormData {
   const form = new FormData();
@@ -232,6 +256,16 @@ export function turnForm(request: TurnRequest): FormData {
     form.append("enabledTopics", JSON.stringify([...request.enabledTopics]));
   }
   form.append("answerMode", request.answerMode);
+  // Absent — not empty — when the agent names no model, so the runtime asks its
+  // own as it always has. The key is written into the body and never logged.
+  if (request.llm !== undefined) {
+    form.append("llmBaseUrl", request.llm.baseUrl);
+    form.append("llmModel", request.llm.model);
+    form.append("llmApiKey", request.llm.apiKey);
+    if (request.llm.temperature !== null) {
+      form.append("llmTemperature", String(request.llm.temperature));
+    }
+  }
   // Always spoken. Every turn this bridge sends is one a device is waiting to hear.
   form.append("speak", "1");
   if (request.audio) {
@@ -260,21 +294,22 @@ export function turnForm(request: TurnRequest): FormData {
  * the bridge cancelled is a turn that ended and not one that failed: raised as an
  * exception it would reach the dispatcher as an error, and the conversation would
  * lose the person's own question along with the reply that was cut off — spending
- * the one half that certainly happened.
+ * the one half that certainly happened. The signal's `reason` says which cancel it
+ * was: the wake word carries none, and a socket that closed carries `DEVICE_GONE`.
  */
 export async function runTurn(
-  config: BridgeConfig,
+  runtime: RuntimeTarget,
   request: TurnRequest,
   sink: TurnSink,
   signal?: AbortSignal
 ): Promise<TurnOutcome> {
   let response: Response;
   try {
-    response = await fetch(`${config.platformUrl}${TURN_PATH}`, {
+    response = await fetch(`${runtime.baseUrl}${TURN_PATH}`, {
       method: "POST",
       // No `Content-Type`: `fetch` writes the multipart boundary itself, and a
       // hand-set header without it is a body the platform cannot parse.
-      headers: platformAuthHeaders(config),
+      headers: runtimeAuthHeaders(runtime),
       body: turnForm(request),
       signal: signal ?? null,
     });
@@ -295,7 +330,7 @@ export async function runTurn(
     throw new Error(`POST ${TURN_PATH} answered ${response.status} ${response.statusText}`);
   }
 
-  return consumeStream(config, response.body, sink, signal);
+  return consumeStream(runtime, response.body, sink, signal);
 }
 
 const TURN_PATH = "/api/voice-agent/stream";
@@ -308,7 +343,7 @@ const TOOL_RESULT_TIMEOUT_MS = 5_000;
 
 /** Read the reply's events, in arrival order, and report how it ended. */
 async function consumeStream(
-  config: BridgeConfig,
+  runtime: RuntimeTarget,
   body: ReadableStream<Uint8Array>,
   sink: TurnSink,
   signal?: AbortSignal
@@ -341,7 +376,7 @@ async function consumeStream(
         const event = parseSseBlock(block);
         if (!event) continue;
         if (event.name === "done" || event.name === "error" || event.name === "notice") settled = true;
-        const reported = await dispatch(config, event, sink);
+        const reported = await dispatch(runtime, event, sink);
         if (event.name === "done") replyText = reported ?? replyText;
         else if (event.name === "text" && reported !== null) {
           // Joined with a space, because a `text` event carries one *segment* of
@@ -401,7 +436,7 @@ function parseSseBlock(block: string): SseEvent | null {
 
 /** Hand one event to the sink. Returns the reply text when the event carried it. */
 async function dispatch(
-  config: BridgeConfig,
+  runtime: RuntimeTarget,
   event: SseEvent,
   sink: TurnSink
 ): Promise<string | null> {
@@ -451,7 +486,7 @@ async function dispatch(
       ok: false,
       message: "this session has no gadget whose tools could be called",
     };
-    await reportToolResult(config, call, outcome);
+    await reportToolResult(runtime, call, outcome);
     return null;
   }
   // An event this service does not model is not an error. A newer endpoint may add
@@ -504,14 +539,14 @@ function readToolCall(payload: Record<string, unknown>): ToolCallRequest | null 
  * What was actually done to the gadget has already happened either way.
  */
 async function reportToolResult(
-  config: BridgeConfig,
+  runtime: RuntimeTarget,
   call: ToolCallRequest,
   outcome: ToolCallOutcome
 ): Promise<void> {
   try {
-    const response = await fetch(`${config.platformUrl}${TOOL_RESULT_PATH}`, {
+    const response = await fetch(`${runtime.baseUrl}${TOOL_RESULT_PATH}`, {
       method: "POST",
-      headers: { "content-type": "application/json", ...platformAuthHeaders(config) },
+      headers: { "content-type": "application/json", ...runtimeAuthHeaders(runtime) },
       body: JSON.stringify({
         turnId: call.turnId,
         index: call.index,

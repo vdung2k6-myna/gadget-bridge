@@ -5,8 +5,9 @@ import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { ENDPOINTER_DEFAULTS, MUSIC_GAIN_DB_DEFAULT, type BridgeConfig } from "../src/config.js";
-import { createPersonaCatalog, type Persona } from "../src/personas.js";
+import type { Gadget, Registry } from "../src/registry.js";
 import { createConversations, takeTurn } from "../src/conversation.js";
+import { DEVICE_GONE } from "../src/turn.js";
 import type { TurnLanguage, TurnSink } from "../src/turn.js";
 
 /**
@@ -25,6 +26,15 @@ import type { TurnLanguage, TurnSink } from "../src/turn.js";
  */
 const PLATFORM = "platform-token-abcdefgh";
 
+/** The fields an agent carries, as the console holds them. */
+interface Persona {
+  id: string;
+  label: string;
+  defaultPrompt: string;
+  knowledgeTopics: string[];
+  answerMode: "generate" | "material";
+}
+
 const CATALOG: Persona[] = [
   {
     id: "interview-coach",
@@ -42,22 +52,26 @@ const CATALOG: Persona[] = [
   },
 ];
 
+interface ConfigMeta {
+  url: string;
+  binding?: string;
+  language?: TurnLanguage;
+}
+
+/** What each config was built for, so a gadget can be built from the same options. */
+const meta = new WeakMap<BridgeConfig, ConfigMeta>();
+
 function configFor(
-  platformUrl: string,
+  runtimeUrl: string,
   options: { historyTurns?: number; binding?: string; language?: TurnLanguage } = {}
 ): BridgeConfig {
-  return {
+  const config: BridgeConfig = {
     otaPort: 0,
     wsPort: 0,
     publicHost: "127.0.0.1",
-    deviceSecret: "s".repeat(43),
-    allowedDevices: ["b81f3f4a9b01", "aa11bb22cc33"],
-    devicePersonas: new Map([
-      ["b81f3f4a9b01", options.binding ?? "interview-coach"],
-      ["aa11bb22cc33", "language-partner"],
-    ]),
-    platformUrl,
-    apiAuthToken: PLATFORM,
+    consoleUrl: "http://127.0.0.1:3001",
+    consoleToken: "console-token-abcdefgh",
+    registryTtlMs: 60_000,
     framing: 3,
     serverRate: 24000,
     frameMs: 60,
@@ -67,17 +81,10 @@ function configFor(
     musicGainDb: MUSIC_GAIN_DB_DEFAULT,
     historyTurns: options.historyTurns ?? 20,
     commandStep: 10,
-    deviceLanguages: new Map([
-      ["b81f3f4a9b01", options.language ?? "english"],
-      ["aa11bb22cc33", "english"],
-    ]),
-    deviceEngines: new Map([
-      ["b81f3f4a9b01", "supertonic"],
-      ["aa11bb22cc33", "supertonic"],
-    ]),
-    devicePartners: new Map(),
     handoverMs: 400,
   };
+  meta.set(config, { url: runtimeUrl, ...options });
+  return config;
 }
 
 interface StubRequest {
@@ -166,12 +173,54 @@ function replyingWith(replies: string[]) {
 
 const noSink: TurnSink = {};
 
-/** A catalog read from the stub, which is what every turn resolves against. */
-async function readyCatalog(config: BridgeConfig) {
-  const catalog = createPersonaCatalog(config);
-  await catalog.refresh();
-  return catalog;
+/**
+ * The gadget a config describes. The console used to be the catalog this test
+ * read; now it is a resolution, and what a turn is asked with comes from it.
+ */
+function gadgetFor(config: BridgeConfig): Gadget {
+  const options = meta.get(config)!;
+  const persona = CATALOG.find((entry) => entry.id === (options.binding ?? "interview-coach"));
+  return {
+    deviceId: "b81f3f4a9b01",
+    owned: true,
+    secret: "s".repeat(43),
+    agent:
+      persona === undefined
+        ? null
+        : {
+            id: persona.id,
+            name: persona.label,
+            systemPrompt: persona.defaultPrompt,
+            language: options.language ?? "english",
+            engine: "supertonic",
+            answerMode: persona.answerMode,
+            topics: persona.knowledgeTopics,
+            runtime: { baseUrl: options.url, token: PLATFORM },
+            llm: null,
+          },
+    partner: null,
+    turns: [],
+    firmware: null,
+  };
 }
+
+/** A registry whose writes are ignored: this file is about what a turn says. */
+const registry: Registry = {
+  resolve: async (deviceId) => ({
+    deviceId,
+    owned: true,
+    secret: "s".repeat(43),
+    agent: null,
+    partner: null,
+    turns: [],
+    firmware: null,
+  }),
+  reportTools: () => {},
+  reportHardware: () => {},
+  activate: async () => "owned",
+  recordTurn: () => {},
+  forget: () => {},
+};
 
 describe("holding a conversation", () => {
   it("keeps each device's conversation to itself", () => {
@@ -276,16 +325,13 @@ describe("a device's turn, from the conversation's side", () => {
     platform.reply(replyingWith(["first answer", "second answer"]));
     try {
       const config = configFor(platform.url);
-      const catalog = await readyCatalog(config);
       const conversations = createConversations(config);
 
       await takeTurn(
-        config, catalog, conversations, "b8:1f:3f:4a:9b:01",
-        { text:"first question" }, noSink
+        config, gadgetFor(config), conversations, registry, { text:"first question" }, noSink
       );
       await takeTurn(
-        config, catalog, conversations, "b8:1f:3f:4a:9b:01",
-        { text:"second question" }, noSink
+        config, gadgetFor(config), conversations, registry, { text:"second question" }, noSink
       );
 
       const turns = platform.requests.filter((r) => r.path.includes("stream"));
@@ -297,6 +343,66 @@ describe("a device's turn, from the conversation's side", () => {
         { role: "agent", content: "first answer" },
       ]);
       assert.equal(fieldOf(turns[1].body, "text"), "second question");
+    } finally {
+      platform.stop();
+    }
+  });
+
+  it("logs no part of the account's key", async () => {
+    // A key is the account's, not ours: it may cross this process, and it must
+    // never land in a line an operator or a log collector reads.
+    const platform = await stubPlatform();
+    const captured: string[] = [];
+    const originals = { log: console.log, warn: console.warn, error: console.error, info: console.info };
+    const capture = (...args: unknown[]) => {
+      captured.push(args.map((arg) => String(arg)).join(" "));
+    };
+    try {
+      const config = configFor(platform.url);
+      const gadget = gadgetFor(config);
+      const withLlm = {
+        ...gadget,
+        agent: {
+          ...gadget.agent!,
+          llm: {
+            baseUrl: platform.url,
+            model: "test-model",
+            apiKey: "sk-secret-that-must-not-be-logged",
+            temperature: null,
+          },
+        },
+      };
+
+      console.log = capture;
+      console.warn = capture;
+      console.error = capture;
+      console.info = capture;
+
+      await takeTurn(config, withLlm, createConversations(config), registry, { text: "hello" }, noSink);
+    } finally {
+      console.log = originals.log;
+      console.warn = originals.warn;
+      console.error = originals.error;
+      console.info = originals.info;
+      platform.stop();
+    }
+
+    assert.equal(captured.join(" | ").includes("sk-secret-that-must-not-be-logged"), false);
+  });
+
+  it("answers without waiting for the record", async () => {
+    // Recording is fire-and-forget: the reply has been spoken by the time the
+    // console is told about it, and a console that never answers must not delay a
+    // single turn.
+    const platform = await stubPlatform();
+    try {
+      const config = configFor(platform.url);
+      const slow: Registry = { ...registry, recordTurn: () => { void new Promise(() => {}); } };
+      const result = await takeTurn(
+        config, gadgetFor(config), createConversations(config), slow,
+        { text: "hello" }, noSink
+      );
+      assert.equal(result.served, true);
     } finally {
       platform.stop();
     }
@@ -315,12 +421,10 @@ describe("a device's turn, from the conversation's side", () => {
     });
     try {
       const config = configFor(platform.url);
-      const catalog = await readyCatalog(config);
       const conversations = createConversations(config);
 
       await takeTurn(
-        config, catalog, conversations, "b81f3f4a9b01",
-        { text:"something else entirely" }, noSink
+        config, gadgetFor(config), conversations, registry, { text:"something else entirely" }, noSink
       );
 
       assert.deepEqual(conversations.history("b81f3f4a9b01"), [
@@ -337,12 +441,10 @@ describe("a device's turn, from the conversation's side", () => {
     platform.reply(replyingWith(["Chào bạn."]));
     try {
       const config = configFor(platform.url);
-      const catalog = await readyCatalog(config);
       const seen: string[] = [];
 
       await takeTurn(
-        config, catalog, createConversations(config), "b81f3f4a9b01",
-        { text:"hi" },
+        config, gadgetFor(config), createConversations(config), registry, { text:"hi" },
         { onUser: (text) => void seen.push(text) }
       );
 
@@ -354,24 +456,21 @@ describe("a device's turn, from the conversation's side", () => {
     }
   });
 
-  it("serves no turn at all when the device's persona is not in the catalog", async () => {
+  it("serves no turn at all when the device has no agent bound", async () => {
     const platform = await stubPlatform();
     try {
       const config = configFor(platform.url, { binding: "gone-from-the-catalog" });
-      const catalog = await readyCatalog(config);
 
       const result = await takeTurn(
-        config, catalog, createConversations(config), "b8:1f:3f:4a:9b:01",
-        { text:"hello" }, noSink
+        config, gadgetFor(config), createConversations(config), registry, { text:"hello" }, noSink
       );
 
       assert.equal(result.served, false);
       if (result.served) return;
-      assert.equal(result.miss, "not-in-catalog");
-      // The line an operator reads has to name the device and the identifier, or
-      // there is nothing in it to act on (3.4).
-      assert.match(result.message, /b8:1f:3f:4a:9b:01/);
-      assert.match(result.message, /gone-from-the-catalog/);
+      assert.equal(result.miss, "no-agent");
+      // The line an operator reads has to name the device, or there is nothing in
+      // it to act on.
+      assert.match(result.message, /b81f3f4a9b01/);
       assert.equal(
         platform.requests.filter((r) => r.path.includes("stream")).length,
         0,
@@ -392,12 +491,10 @@ describe("a device's turn, from the conversation's side", () => {
     });
     try {
       const config = configFor(platform.url);
-      const catalog = await readyCatalog(config);
       const conversations = createConversations(config);
 
       await takeTurn(
-        config, catalog, conversations, "b81f3f4a9b01",
-        { text:"hello" }, noSink
+        config, gadgetFor(config), conversations, registry, { text:"hello" }, noSink
       );
 
       assert.deepEqual(conversations.history("b81f3f4a9b01"), [
@@ -406,10 +503,60 @@ describe("a device's turn, from the conversation's side", () => {
       // And the device can take a further turn: a refused turn is the platform's
       // answer to one turn, not a state the conversation is left in (4.4).
       const after = await takeTurn(
-        config, catalog, conversations, "b81f3f4a9b01",
-        { text:"again" }, noSink
+        config, gadgetFor(config), conversations, registry, { text:"again" }, noSink
       );
       assert.equal(after.served, true);
+    } finally {
+      platform.stop();
+    }
+  });
+
+  it("records no reply for a turn the gadget left before hearing it", async () => {
+    // The socket closed after the runtime had started answering, and the runtime went on
+    // producing after it had gone — measured twice on 2026-10-28. What was read from the
+    // stream is not what reached the gadget, so the transcript keeps the question and
+    // records no answer, rather than seeding the next session with words nobody heard.
+    const platform = await stubPlatform();
+    platform.reply((res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write('event: user\ndata: {"text":"hôm nay trời đẹp"}\n\n');
+      res.write('event: text\ndata: {"text":"Đúng"}\n\n');
+      res.write('event: done\ndata: {"fullText":"Đúng vậy, trời rất đẹp."}\n\n');
+      res.end();
+    });
+    try {
+      const config = configFor(platform.url);
+      const conversations = createConversations(config);
+      const controller = new AbortController();
+
+      let said: () => void = () => {};
+      const textArrived = new Promise<void>((resolve) => {
+        said = resolve;
+      });
+      const running = takeTurn(
+        config,
+        gadgetFor(config),
+        conversations,
+        registry,
+        { text: "hello" },
+        {
+          onText: () => {
+            // The gadget goes away as the reply is arriving, which is the shape the
+            // close handler produces: a turn aborted for the device, not for the person.
+            controller.abort(DEVICE_GONE);
+            said();
+          },
+        },
+        controller.signal
+      );
+      await textArrived;
+      await running;
+
+      assert.deepEqual(
+        conversations.history("b81f3f4a9b01"),
+        [{ role: "user", content: "hôm nay trời đẹp" }],
+        "the question stands and the answer nobody heard does not"
+      );
     } finally {
       platform.stop();
     }
@@ -433,12 +580,10 @@ describe("a command the bridge answered itself", () => {
     });
     try {
       const config = configFor(platform.url, { language: "vietnamese" });
-      const catalog = await readyCatalog(config);
       const conversations = createConversations(config);
 
       const result = await takeTurn(
-        config, catalog, conversations, "b81f3f4a9b01",
-        { text:"anything" }, noSink
+        config, gadgetFor(config), conversations, registry, { text:"anything" }, noSink
       );
 
       assert.equal(result.served, true, "the turn was taken; it was the gadget that answered it");
@@ -456,12 +601,10 @@ describe("a command the bridge answered itself", () => {
     platform.reply(replyingWith(["Được."]));
     try {
       const config = configFor(platform.url, { language: "vietnamese" });
-      const catalog = await readyCatalog(config);
       const conversations = createConversations(config);
 
       await takeTurn(
-        config, catalog, conversations, "b81f3f4a9b01",
-        { text:"giảm âm lượng" }, noSink
+        config, gadgetFor(config), conversations, registry, { text:"giảm âm lượng" }, noSink
       );
 
       assert.deepEqual(conversations.history("b81f3f4a9b01"), [
@@ -490,11 +633,9 @@ describe("the gadget's condition, on the turn", () => {
     platform.reply(replyingWith(["ok"]));
     try {
       const config = configFor(platform.url);
-      const catalog = await readyCatalog(config);
 
       await takeTurn(
-        config, catalog, createConversations(config), "b81f3f4a9b01",
-        { text:"how are you", gadgetCondition: REPORT }, noSink
+        config, gadgetFor(config), createConversations(config), registry, { text:"how are you", gadgetCondition: REPORT }, noSink
       );
 
       const [turn] = platform.requests.filter((r) => r.path.includes("stream"));
@@ -519,11 +660,9 @@ describe("the gadget's condition, on the turn", () => {
     platform.reply(replyingWith(["ok"]));
     try {
       const config = configFor(platform.url);
-      const catalog = await readyCatalog(config);
 
       await takeTurn(
-        config, catalog, createConversations(config), "b81f3f4a9b01",
-        { text:"how are you" }, noSink
+        config, gadgetFor(config), createConversations(config), registry, { text:"how are you" }, noSink
       );
 
       const [turn] = platform.requests.filter((r) => r.path.includes("stream"));
@@ -540,16 +679,13 @@ describe("the gadget's condition, on the turn", () => {
     platform.reply(replyingWith(["first answer", "second answer"]));
     try {
       const config = configFor(platform.url);
-      const catalog = await readyCatalog(config);
       const conversations = createConversations(config);
 
       await takeTurn(
-        config, catalog, conversations, "b81f3f4a9b01",
-        { text:"one", gadgetCondition: REPORT }, noSink
+        config, gadgetFor(config), conversations, registry, { text:"one", gadgetCondition: REPORT }, noSink
       );
       await takeTurn(
-        config, catalog, conversations, "b81f3f4a9b01",
-        { text:"two" }, noSink
+        config, gadgetFor(config), conversations, registry, { text:"two" }, noSink
       );
 
       const turns = platform.requests.filter((r) => r.path.includes("stream"));

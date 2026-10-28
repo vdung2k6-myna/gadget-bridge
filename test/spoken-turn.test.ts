@@ -10,8 +10,8 @@ import { WebSocket } from "ws";
 import { ENDPOINTER_DEFAULTS, MUSIC_GAIN_DB_DEFAULT, type BridgeConfig } from "../src/config.js";
 import type { TurnEngine, TurnLanguage } from "../src/turn.js";
 import { createConversations } from "../src/conversation.js";
-import { deriveToken } from "../src/credentials.js";
-import { createPersonaCatalog } from "../src/personas.js";
+import { deriveToken, normalizeDeviceId } from "../src/credentials.js";
+import type { Gadget, Registry } from "../src/registry.js";
 import { createWsServer } from "../src/server/ws.js";
 import { frame } from "../src/protocol/framing.js";
 import { encodeOpusFrames } from "../src/protocol/opus.js";
@@ -118,6 +118,7 @@ async function stubPlatform(
   toolResults: Array<Record<string, unknown>>;
   stop(): void;
 }> {
+  activeCatalog = catalog as typeof activeCatalog;
   const requests: PlatformRequest[] = [];
   const toolResults: Array<Record<string, unknown>> = [];
   let calls = 0;
@@ -156,43 +157,104 @@ async function stubPlatform(
   };
 }
 
+interface Speech {
+  language: TurnLanguage;
+  engine: TurnEngine;
+}
+
+/** What a config was built for beyond its environment: the console answers these now. */
+interface DeviceMeta {
+  url: string;
+  speech: Map<string, Speech>;
+  partner: Map<string, string>;
+}
+
+const META = new WeakMap<BridgeConfig, DeviceMeta>();
+let pendingSpeech: Map<string, Speech> | undefined;
+let pendingPair: Map<string, string> | undefined;
+/** The persona list the stub currently answers with, chosen per test. */
+let activeCatalog: ReadonlyArray<{
+  id: string;
+  label: string;
+  defaultPrompt: string;
+  knowledgeTopics: string[];
+  answerMode: string;
+}> = CATALOG;
+
+const FIRST_ID = normalizeDeviceId(BOARD);
+
 /** The two gadgets' bindings, each pair given — for the tests where the two must differ,
  *  which is what "each gadget states its own language and engine" is about (design D6). */
-const bindSpeech = (
-  first: { language: TurnLanguage; engine: TurnEngine },
-  second: { language: TurnLanguage; engine: TurnEngine }
-): Pick<BridgeConfig, "deviceLanguages" | "deviceEngines"> => ({
-  deviceLanguages: new Map([
-    [DEVICE, first.language],
-    [SECOND_DEVICE, second.language],
-  ]),
-  deviceEngines: new Map([
-    [DEVICE, first.engine],
-    [SECOND_DEVICE, second.engine],
-  ]),
-});
+const bindSpeech = (first: Speech, second: Speech): Partial<BridgeConfig> => {
+  pendingSpeech = new Map([
+    [FIRST_ID, first],
+    [SECOND_DEVICE, second],
+  ]);
+  return {};
+};
 
-/** The same pair for both gadgets, which is what a one-gadget test wants, and what the
- *  second gadget is given wherever a test does not care what it is bound to. */
+/** The same pair for both gadgets, which is what a one-gadget test wants. */
 const speech = (
   language: TurnLanguage = "english",
   engine: TurnEngine = "supertonic"
-): Pick<BridgeConfig, "deviceLanguages" | "deviceEngines"> =>
-  bindSpeech({ language, engine }, { language: "english", engine: "supertonic" });
+): Partial<BridgeConfig> => bindSpeech({ language, engine }, { language: "english", engine: "supertonic" });
+
+/**
+ * The console, as these tests see it: a gadget owned by somebody, spoken through the
+ * language and engine the test bound, answered by the persona the stub offers, and
+ * paired where the test says so.
+ */
+function registryFor(config: BridgeConfig): Registry {
+  const meta = META.get(config)!;
+  // What the console would have recorded, so a second session resumes the same
+  // conversation the first one had — which is what the record is for.
+  const recorded = new Map<string, { user: string; agent: string }[]>();
+  return {
+    resolve: async (rawDeviceId): Promise<Gadget> => {
+      const deviceId = normalizeDeviceId(rawDeviceId);
+      const bound = meta.speech.get(deviceId) ?? { language: "english", engine: "supertonic" };
+      const persona = activeCatalog[deviceId === SECOND_DEVICE ? 1 : 0] ?? activeCatalog[0]!;
+      return {
+        deviceId,
+        owned: true,
+        secret: SECRET,
+        agent: {
+          id: persona.id,
+          name: persona.label,
+          systemPrompt: persona.defaultPrompt,
+          language: bound.language,
+          engine: bound.engine,
+          answerMode: persona.answerMode === "material" ? "material" : "generate",
+          topics: persona.knowledgeTopics,
+          runtime: { baseUrl: meta.url, token: PLATFORM },
+          llm: null,
+        },
+        partner: meta.partner.get(deviceId) ?? null,
+        turns: recorded.get(deviceId) ?? [],
+        firmware: null,
+      };
+    },
+    reportTools: () => {},
+    reportHardware: () => {},
+    activate: async () => "owned",
+    recordTurn: (turn) => {
+      const deviceId = normalizeDeviceId(turn.deviceId);
+      const kept = recorded.get(deviceId) ?? [];
+      kept.push({ user: turn.userText, agent: turn.assistantText });
+      recorded.set(deviceId, kept);
+    },
+    forget: () => {},
+  };
+}
 
 function configFor(platformUrl: string, overrides: Partial<BridgeConfig> = {}): BridgeConfig {
-  return {
+  const config: BridgeConfig = {
     otaPort: 0,
     wsPort: 0,
     publicHost: "127.0.0.1",
-    deviceSecret: SECRET,
-    allowedDevices: [DEVICE, SECOND_DEVICE],
-    devicePersonas: new Map([
-      [DEVICE, "language-partner"],
-      [SECOND_DEVICE, "debate-partner"],
-    ]),
-    platformUrl,
-    apiAuthToken: PLATFORM,
+    consoleUrl: "http://127.0.0.1:3001",
+    consoleToken: "console-token-abcdefgh",
+    registryTtlMs: 60_000,
     framing: 3,
     serverRate: 24000,
     frameMs: FRAME_MS,
@@ -202,11 +264,17 @@ function configFor(platformUrl: string, overrides: Partial<BridgeConfig> = {}): 
     musicGainDb: MUSIC_GAIN_DB_DEFAULT,
     historyTurns: 20,
     commandStep: 10,
-    ...speech(),
-    devicePartners: new Map(),
     handoverMs: 400,
     ...overrides,
   };
+  META.set(config, {
+    url: platformUrl,
+    speech: pendingSpeech ?? new Map([[FIRST_ID, { language: "english", engine: "supertonic" }]]),
+    partner: pendingPair ?? new Map(),
+  });
+  pendingSpeech = undefined;
+  pendingPair = undefined;
+  return config;
 }
 
 interface Session {
@@ -347,7 +415,7 @@ async function connect(port: number, deviceId: string): Promise<Session> {
  *  wants: the pair above, composed, so that one `stop()` in a `finally` takes down both. */
 async function spokenDevice(
   config: BridgeConfig,
-  services: BridgeServices = { catalog: createPersonaCatalog(config), conversations: createConversations(config) }
+  services: BridgeServices = { registry: registryFor(config), conversations: createConversations(config) }
 ): Promise<Session> {
   const server = await startedServer(config, services);
   const device = await connect(server.port, BOARD);
@@ -1700,7 +1768,7 @@ describe("a session nobody is speaking into", () => {
     const platform = await stubPlatform((res) => reply(res, "khong ai noi gi"));
     const config = configFor(platform.url, { sessionIdleMs: 400 });
     const services: BridgeServices = {
-      catalog: createPersonaCatalog(config),
+      registry: registryFor(config),
       conversations: createConversations(config),
     };
 
@@ -1729,7 +1797,7 @@ describe("a session nobody is speaking into", () => {
     );
     const config = configFor(platform.url, { sessionIdleMs: 150 });
     const services: BridgeServices = {
-      catalog: createPersonaCatalog(config),
+      registry: registryFor(config),
       conversations: createConversations(config),
     };
 
@@ -1779,7 +1847,7 @@ async function twoListeningGadgets(port: number): Promise<[Session, Session]> {
 
 /** What a bridge holds between sockets, for the tests that build one by hand. */
 const servicesFor = (config: BridgeConfig): BridgeServices => ({
-  catalog: createPersonaCatalog(config),
+  registry: registryFor(config),
   conversations: createConversations(config),
 });
 
@@ -1788,12 +1856,13 @@ describe("two paired gadgets take turns", () => {
   // asserted here is the shape of the exchange — whose words a turn is asked with, when it is
   // spoken, and what the gadget listening does meanwhile — because those are the three things that
   // go wrong in a room where each gadget can hear the other (proposal.md, design D1–D7).
-  const pair = (): Pick<BridgeConfig, "devicePartners"> => ({
-    devicePartners: new Map([
-      [DEVICE, SECOND_DEVICE],
-      [SECOND_DEVICE, DEVICE],
-    ]),
-  });
+  const pair = (): Partial<BridgeConfig> => {
+    pendingPair = new Map([
+      [FIRST_ID, SECOND_DEVICE],
+      [SECOND_DEVICE, FIRST_ID],
+    ]);
+    return {};
+  };
 
   /** One call's reply: what the platform heard, and the sentence it says back. */
   const says = (heard: string, spoken: string) => (res: ServerResponse): void => {
@@ -2747,6 +2816,238 @@ describe("two gadgets on one bridge", () => {
     } finally {
       first.stop();
       second.stop();
+      server.stop();
+      platform.stop();
+    }
+  });
+});
+
+describe("a gadget that goes away while it is being answered", () => {
+  it("ends the turn, and says so, instead of answering a socket that is gone", async () => {
+    // The shape measured twice on 2026-10-28: the socket closes mid-turn (1006), the platform
+    // keeps producing, and every delivery finds a closed socket. The turn has to end with the
+    // socket, the closed session must not keep a window or a deadline for a device that is not
+    // there, and the log must not call it a turn that ended normally.
+    let clientGone: () => void = () => {};
+    const aborted = new Promise<void>((resolve) => {
+      clientGone = resolve;
+    });
+    const platform = await stubPlatform((res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(sse("user", { text: "toi muon nghe radio" }));
+      // Never ended: the turn is still being produced when the device disappears, and the
+      // client's abort is what closes this response.
+      res.on("close", () => clientGone());
+    });
+    const config = configFor(platform.url, { sessionIdleMs: 1_200 });
+
+    let device: Session | undefined;
+    const { written } = await capturing(async () => {
+      const session = await spokenDevice(config);
+      device = session;
+      session.send({ type: "hello", version: 3, transport: "websocket" });
+      await session.until(() => session.messages.some((m) => m.includes('"hello"')), "the server hello");
+      session.send({ type: "listen", state: "start", mode: "manual" });
+      session.speak();
+      await session.until(
+        () => session.messages.some((m) => JSON.parse(m).type === "stt"),
+        "the platform's transcription"
+      );
+      session.stop();
+      await Promise.race([
+        aborted,
+        new Promise((_, reject) => {
+          setTimeout(
+            () => reject(new Error("the turn's platform request was not aborted when the socket closed")),
+            3_000
+          ).unref();
+        }),
+      ]);
+      // Past the idle window the closed session used to re-arm. Nothing may end it twice.
+      await new Promise((resolve) => setTimeout(resolve, 1_600));
+    });
+
+    try {
+      assert.match(written, /turn cancelled — the device left/, "the turn ends as a cancellation");
+      assert.doesNotMatch(written, /turn ended settled/, "and not as a turn that ended normally");
+      assert.doesNotMatch(
+        written,
+        /no bracket was opened for that turn/,
+        "no listening window is reopened for a session whose socket has closed"
+      );
+      assert.doesNotMatch(written, /no person in/, "and no idle deadline is re-armed to end it a second time");
+    } finally {
+      device?.stop();
+      platform.stop();
+    }
+  });
+
+  it("drops the partner's prepared reply when the gadget that asked for it goes away", async () => {
+    // An exchange is two gadgets; one leaving ends it. The reply the survivor had already
+    // prepared is answered to a turn whose asker is gone, so it is dropped rather than spoken,
+    // and the survivor's next turn reports the pair as gone instead of waiting on it.
+    const says = (heard: string, spoken: string) => (res: ServerResponse): void => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(sse("user", { text: heard }));
+      res.write(sse("sentence", { index: 0, text: spoken, audioData: sentenceAudio(REPLY_SECONDS) }));
+      res.write(sse("done", { fullText: spoken }));
+      res.end();
+    };
+    const platform = await stubPlatform(
+      (res, call) =>
+        says(
+          call === 0 ? "who are you" : "the first gadget's words",
+          call === 0 ? "I am the interviewer." : "I am the candidate."
+        )(res),
+      CATALOG_TWO
+    );
+    pendingPair = new Map([
+      [FIRST_ID, SECOND_DEVICE],
+      [SECOND_DEVICE, FIRST_ID],
+    ]);
+    const config = configFor(platform.url, { handoverMs: 50 });
+    const server = await startedServer(config, servicesFor(config));
+    const [first, second] = await twoListeningGadgets(server.port);
+
+    const lines: string[] = [];
+    const original = console.log;
+    console.log = (...a: unknown[]): void => void lines.push(a.map(String).join(" "));
+    try {
+      first.speak();
+      await first.until(() => platform.requests.length === 2, "the partner's turn to be prepared");
+      assert.equal(
+        second.messages.filter((m) => JSON.parse(m).type === "tts").length,
+        0,
+        "the partner holds it while the first gadget is still speaking"
+      );
+
+      first.stop();
+      // Long enough for the floor to have been released and the reply spoken, had it survived.
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+
+      assert.match(
+        lines.join("\n"),
+        /the prepared reply was dropped/,
+        "the partner's reply ends with the exchange it belonged to"
+      );
+      assert.equal(
+        second.messages.filter((m) => JSON.parse(m).type === "tts").length,
+        0,
+        "and nothing of it is spoken"
+      );
+      assert.equal(second.binaries.length, 0, "not one frame of it either");
+
+      // The survivor's next turn reports the pairing as gone rather than waiting on it.
+      second.speak();
+      await second.until(() => platform.requests.length === 3, "the survivor's next turn");
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      assert.match(lines.join("\n"), /is not connected, so nothing follows this turn/);
+    } finally {
+      console.log = original;
+      first.stop();
+      second.stop();
+      server.stop();
+      platform.stop();
+    }
+  });
+
+  it("ends a turn whose tool already succeeded when the socket goes, and keeps the question", async () => {
+    // The second measured sequence: the gadget answers a tool call and its socket dies in the
+    // same breath — the radio is playing, the confirmation reaches nobody. The turn must end
+    // cancelled, and the reconnected gadget must resume from the question alone.
+    const TOOLS = [
+      { name: "self.get_device_status", description: "…", inputSchema: { type: "object", properties: {} } },
+      {
+        name: "self.radio.play",
+        description: "Play an internet radio station.",
+        inputSchema: { type: "object", properties: { station: { type: "string" } } },
+      },
+    ];
+    const STATUS = { audio_speaker: { volume: 42 } };
+    const platform = await stubPlatform((res, call) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      if (call > 0) {
+        res.write(sse("user", { text: "lan nay noi gi" }));
+        res.write(sse("done", { fullText: "Da hieu." }));
+        res.end();
+        return;
+      }
+      res.write(sse("user", { text: "toi muon nghe radio" }));
+      res.write(
+        sse("tool_call", {
+          turnId: "turn-1",
+          index: 0,
+          name: "self.radio.play",
+          arguments: { station: "vov3" },
+        })
+      );
+      // Held open: the reply is still being produced when the socket goes.
+    });
+
+    const config = configFor(platform.url);
+    const server = await startedServer(config, servicesFor(config));
+    const lines: string[] = [];
+    const original = console.log;
+    console.log = (...a: unknown[]): void => void lines.push(a.map(String).join(" "));
+
+    const handshake = async (session: Session): Promise<ReturnType<typeof gadgetSide>> => {
+      session.send({ type: "hello", version: 3, transport: "websocket", features: { mcp: true } });
+      await session.until(() => session.messages.some((m) => m.includes('"hello"')), "the server hello");
+      const side = gadgetSide(session);
+      await side.replyTo("initialize", {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        serverInfo: { name: "xiaozhi-s3", version: "1.0.0" },
+      });
+      await side.replyTo("tools/list", { tools: TOOLS, nextCursor: "" });
+      await side.replyTo("tools/call", {
+        content: [{ type: "text", text: JSON.stringify(STATUS) }],
+        isError: false,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return side;
+    };
+
+    let first: Session | undefined;
+    let second: Session | undefined;
+    try {
+      first = await connect(server.port, BOARD);
+      const gadget = await handshake(first);
+      first.send({ type: "listen", state: "start", mode: "manual" });
+      first.speak();
+      await first.until(() => platform.requests.length === 1, "the turn to be served");
+
+      await gadget.replyTo("tools/call", {
+        content: [{ type: "text", text: JSON.stringify({ success: true, message: "Đang phát VOV3" }) }],
+        isError: false,
+      });
+      await first.until(() => platform.toolResults.length === 1, "the tool's result to reach the platform");
+
+      // The socket goes in the same breath as the tool's answer.
+      first.stop();
+      await new Promise((resolve) => setTimeout(resolve, 400));
+
+      assert.match(lines.join("\n"), /turn cancelled — the device left/, "the turn ends as a cancellation");
+      assert.doesNotMatch(lines.join("\n"), /turn ended settled/, "not as a turn that ended normally");
+
+      // The gadget comes back: the conversation continues from the question, with no answer the
+      // previous session never heard.
+      second = await connect(server.port, BOARD);
+      await handshake(second);
+      second.send({ type: "listen", state: "start", mode: "manual" });
+      second.speak();
+      await second.until(() => platform.requests.length === 2, "the reconnected turn to be served");
+
+      const body = platform.requests[1]!.body.toString("utf8").replace(/\r\n/g, "\n");
+      const historyAt = body.indexOf('name="history"');
+      assert.ok(historyAt > 0, "the reconnected turn carried a history");
+      const history = body.slice(body.indexOf("\n\n", historyAt) + 2, body.indexOf("\n--", historyAt));
+      assert.ok(history.includes("toi muon nghe radio"), "the question the person asked is still there");
+      assert.ok(!history.includes("Đang phát"), "and no answer nobody heard follows it");
+    } finally {
+      console.log = original;
+      first?.stop();
+      second?.stop();
       server.stop();
       platform.stop();
     }

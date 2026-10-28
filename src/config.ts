@@ -25,32 +25,22 @@ export interface BridgeConfig {
   /** The address named in the OTA response — one the device can route to. */
   publicHost: string;
   /**
-   * The secret every device token is derived from (`credentials.ts`). It is the
-   * one secret in this service that must never be on a device, and the whole of
-   * what an attacker would need to connect as any device on the allowlist.
+   * Where the console is, as a base URL with no trailing slash. Required, and with no
+   * default: a default would be localhost on a developer's machine and silently wrong
+   * everywhere else.
    */
-  deviceSecret: string;
-  /** The devices this bridge will issue a token to, normalized for comparison. */
-  allowedDevices: string[];
+  consoleUrl: string;
   /**
-   * Which persona each device speaks as, normalized Device-Id → persona id, read
-   * from `BRIDGE_DEVICE_PERSONAS`. Every device the allowlist names is in here:
-   * a device that may connect and has no persona could never be answered, so the
-   * two lists are required to describe the same devices (see `requireBindings`).
+   * The bridge's own credential for the console. Held here and sent only to the
+   * console — never in anything a device receives.
    */
-  devicePersonas: ReadonlyMap<string, string>;
+  consoleToken: string;
   /**
-   * Where the platform is, as a base URL with no trailing slash — the address
-   * every server-to-server call is joined onto. Read from `BRIDGE_PLATFORM_URL`.
+   * How long a device resolution is reused before the console is asked again. A
+   * released device keeps being served until this window ends, which is the bound
+   * the registry capability states rather than a claim of instant revocation.
    */
-  platformUrl: string;
-  /**
-   * The platform's own credential (`API_AUTH_TOKEN`), held so the bridge can
-   * call the platform on a device's behalf. It is the other half of the boundary
-   * `deviceSecret` starts: that one must never be on the platform, this one must
-   * never be on a device, and nothing this service sends to a device reads it.
-   */
-  apiAuthToken: string;
+  registryTtlMs: number;
   /** The binary framing version both directions use. */
   framing: FramingVersion;
   /** The sample rate the server declares it will send, in Hz. */
@@ -70,68 +60,6 @@ export interface BridgeConfig {
    * turn's history is one exchange shorter than this on the wire.
    */
   historyTurns: number;
-  /**
-   * The language each gadget is heard and answered in, by normalized Device-Id
-   * (D12). The platform decodes the utterance in the language the turn names
-   * rather than detecting one, and reads an absent value as English, so the
-   * language is declared on every turn — and it is the **gadget's** rather than
-   * the deployment's, so that two gadgets on one bridge can be heard in different
-   * languages: a Vietnamese gadget whose turns omitted its language would
-   * transcribe clean Vietnamese into a foreign script while looking, from the
-   * bridge's side, exactly like one that was told to.
-   *
-   * Read from `BRIDGE_DEVICE_LANGUAGES`, one `DEVICE=VALUE` per gadget; a value
-   * that is not one of the two words the endpoint accepts throws, because a typo
-   * here fails silently in exactly the way above. Every gadget the allowlist names
-   * is bound here, and the check is at start (`requireBindings`).
-   */
-  deviceLanguages: ReadonlyMap<string, TurnLanguage>;
-  /**
-   * The synthesis engine each gadget is spoken through, by normalized Device-Id —
-   * the sibling of `deviceLanguages`, one field over. The *voice* is the platform's,
-   * resolved from an engine and a language together, so what this decides is which
-   * models a gadget's turns reach; two gadgets naming the same pair still sound
-   * identical.
-   *
-   * Stated rather than left out, because leaving it out is **not** "no preference".
-   * The endpoint folds an absent or unrecognized engine to `"kokoro"` *before* it
-   * consults its own default, so a turn that dropped the field would ask for an
-   * engine this deployment may never have chosen — and the platform's own
-   * per-language fallback stays unreachable for as long as that fold is there.
-   * Naming the engine is the only way to ask for another one.
-   *
-   * Read from `BRIDGE_DEVICE_ENGINES`, one `DEVICE=VALUE` per gadget; anything that
-   * is not one of the three names the endpoint accepts throws, for the reason the
-   * language throws: the endpoint's own fold would turn an operator's typo into a
-   * different voice and say nothing about it. Every gadget the allowlist names is
-   * bound here, and the check is at start (`requireBindings`).
-   *
-   * It was one setting for the deployment until one bridge ran two gadgets: the same
-   * engine for every turn and every gadget, which is why the two of them sounded
-   * alike however differently they were bound.
-   *
-   * What it does not do is check the engine against the language. The models a
-   * deployment has installed are the platform's, and this service cannot know which
-   * engine speaks which language without hardcoding another repository's facts
-   * (design.md D5) — so that pairing is `.env.example`'s to state rather than this
-   * service's to refuse.
-   */
-  deviceEngines: ReadonlyMap<string, TurnEngine>;
-  /**
-   * The one pair of gadgets that hold a conversation, each mapping to the other, or
-   * empty (D7). Read from `BRIDGE_DEVICE_PARTNERS` as one `DEVICE=DEVICE` entry.
-   *
-   * A *relation* rather than a binding, which is why it is not read into the lists above
-   * and not checked by `requireBindings`: every gadget the allowlist names must be bound
-   * to a persona, a language and an engine, and no gadget has to be paired. What is
-   * required is that both devices it names are in the allowlist — a gadget that may not
-   * connect cannot take part in a conversation — and that a deployment records one pair,
-   * because this service has no shape for a second conversation.
-   *
-   * Held both ways round, because every reader of it asks "who is this gadget's partner"
-   * and nobody asks which side the deployment wrote.
-   */
-  devicePartners: ReadonlyMap<string, string>;
   /**
    * How long after the floor is free a prepared turn is released, in ms, read from
    * `BRIDGE_HANDOVER_MS` (D7).
@@ -303,12 +231,6 @@ function readFraming(env: NodeJS.ProcessEnv): FramingVersion {
  * failure D12 describes: an operator who typed `vi` would get a bridge that
  * transcribes Vietnamese as English and says nothing about it.
  */
-function asLanguage(name: string, device: string, raw: string): TurnLanguage {
-  if (raw !== "english" && raw !== "vietnamese") {
-    throw new Error(`${name} binds ${device} to ${JSON.stringify(raw)}, which is not a language: english or vietnamese`);
-  }
-  return raw;
-}
 
 /**
  * A gadget's engine, as the endpoint's own three-word vocabulary — the same
@@ -320,12 +242,6 @@ function asLanguage(name: string, device: string, raw: string): TurnLanguage {
  * named no engine used to speak through the deployment's, and now a gadget with no
  * binding is one the bridge refuses to start for (`requireBindings`).
  */
-function asEngine(name: string, device: string, raw: string): TurnEngine {
-  if (raw !== "kokoro" && raw !== "piper" && raw !== "supertonic") {
-    throw new Error(`${name} binds ${device} to ${JSON.stringify(raw)}, which is not an engine: kokoro, piper or supertonic`);
-  }
-  return raw;
-}
 
 /**
  * The level a track is played at, as a difference in dB from the file.
@@ -367,16 +283,6 @@ export const MUSIC_GAIN_DB_DEFAULT = -10;
  * and what D6 records a finished bridge must not do — so a bridge without one
  * refuses to start, and says how to make one.
  */
-function readDeviceSecret(env: NodeJS.ProcessEnv): string {
-  const secret = env.BRIDGE_DEVICE_SECRET?.trim() ?? "";
-  if (secret.length < 32) {
-    throw new Error(
-      `BRIDGE_DEVICE_SECRET must be set, at least 32 characters, and never reused between deployments. ` +
-        `Generate one with: node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"`
-    );
-  }
-  return secret;
-}
 
 /**
  * The platform's credential is required and has no default, for the reason the
@@ -392,30 +298,12 @@ function readDeviceSecret(env: NodeJS.ProcessEnv): string {
  * credential that no longer works. Only a value that is nothing but whitespace
  * is treated as absent, since that is a mistake rather than a token.
  */
-function readApiAuthToken(env: NodeJS.ProcessEnv): string {
-  const token = env.API_AUTH_TOKEN ?? "";
-  if (token.trim() === "") {
-    throw new Error(
-      "API_AUTH_TOKEN must be set: it is the platform's own credential, and the bridge is what calls the platform. " +
-        "Copy it from adaptive-interview-api's .env — and never onto a device."
-    );
-  }
-  return token;
-}
 
 /**
  * The allowlist. Empty is empty: a device is allowed because it is named, and a
  * bridge with nothing named lets nothing connect. Separators and case do not
  * distinguish devices — see `normalizeDeviceId`.
  */
-function readAllowedDevices(env: NodeJS.ProcessEnv): string[] {
-  const raw = env.BRIDGE_ALLOWED_DEVICES ?? "";
-  const devices = raw
-    .split(/[\s,;]+/)
-    .map((entry) => normalizeDeviceId(entry))
-    .filter((entry) => entry !== "");
-  return [...new Set(devices)];
-}
 
 /**
  * Where the platform is. Required, and with no default, for a reason the port
@@ -432,33 +320,6 @@ function readAllowedDevices(env: NodeJS.ProcessEnv): string[] {
  * are dropped once, here, so joining a path is a plain concatenation and no call
  * site has to remember which of them is the odd one out.
  */
-function readPlatformUrl(env: NodeJS.ProcessEnv): string {
-  const raw = env.BRIDGE_PLATFORM_URL ?? "";
-  if (raw.trim() === "") {
-    throw new Error(
-      "BRIDGE_PLATFORM_URL must be set: it is where the bridge reaches adaptive-interview-api, " +
-        'for example BRIDGE_PLATFORM_URL=http://127.0.0.1:4000. There is no default, because a ' +
-        "default would point a deployment at whatever machine happened to be localhost."
-    );
-  }
-  let url: URL;
-  try {
-    url = new URL(raw.trim());
-  } catch {
-    throw new Error(
-      `BRIDGE_PLATFORM_URL must be an absolute URL like http://host:4000, got ${JSON.stringify(raw)}`
-    );
-  }
-  if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new Error(`BRIDGE_PLATFORM_URL must be http or https, got ${JSON.stringify(raw)}`);
-  }
-  if (url.search !== "" || url.hash !== "") {
-    throw new Error(
-      `BRIDGE_PLATFORM_URL must be a base URL without a query or fragment, got ${JSON.stringify(raw)}`
-    );
-  }
-  return (url.origin + url.pathname).replace(/\/+$/, "");
-}
 
 /**
  * One `DEVICE=VALUE` list, read the way all three are read.
@@ -476,29 +337,6 @@ function readPlatformUrl(env: NodeJS.ProcessEnv): string {
  * `word` is the noun a value is called in the errors ("persona", "language"), so
  * that an operator reading one of them knows which list they are looking at.
  */
-function readBindings(env: NodeJS.ProcessEnv, name: string, word: string): Map<string, string> {
-  const raw = env[name] ?? "";
-  const bindings = new Map<string, string>();
-  for (const entry of raw.split(/[\s,;]+/).filter((part) => part !== "")) {
-    const separator = entry.indexOf("=");
-    if (separator <= 0) {
-      throw new Error(`${name} entries are DEVICE=${word.toUpperCase()}, got ${JSON.stringify(entry)}`);
-    }
-    const device = normalizeDeviceId(entry.slice(0, separator));
-    const value = entry.slice(separator + 1).trim();
-    if (device === "") {
-      throw new Error(`${name} entry ${JSON.stringify(entry)} names no device`);
-    }
-    if (value === "") {
-      throw new Error(`${name} entry ${JSON.stringify(entry)} names no ${word}`);
-    }
-    if (bindings.has(device)) {
-      throw new Error(`${name} binds ${device} twice, and a device has one ${word}`);
-    }
-    bindings.set(device, value);
-  }
-  return bindings;
-}
 
 /**
  * The one pair of gadgets that converse (D7).
@@ -509,36 +347,6 @@ function readBindings(env: NodeJS.ProcessEnv, name: string, word: string): Map<s
  * gadget is not its own partner. Nothing here is required of a gadget the allowlist names
  * — an unpaired deployment is every deployment but one.
  */
-function readPartners(env: NodeJS.ProcessEnv, allowedDevices: string[]): Map<string, string> {
-  const declared = readBindings(env, "BRIDGE_DEVICE_PARTNERS", "partner");
-  if (declared.size === 0) return new Map();
-  if (declared.size > 1) {
-    throw new Error(
-      `BRIDGE_DEVICE_PARTNERS records one pair, and this one records ${declared.size}: a ` +
-        `conversation is between two gadgets, and this service has no shape for a second one`
-    );
-  }
-  const [device, written] = [...declared][0]!;
-  const partner = normalizeDeviceId(written);
-  if (partner === "") {
-    throw new Error(`BRIDGE_DEVICE_PARTNERS entry ${JSON.stringify(`${device}=${written}`)} names no partner`);
-  }
-  if (partner === device) {
-    throw new Error(`BRIDGE_DEVICE_PARTNERS pairs ${device} with itself, which is one gadget and not two`);
-  }
-  for (const named of [device, partner]) {
-    if (!allowedDevices.includes(named)) {
-      throw new Error(
-        `BRIDGE_DEVICE_PARTNERS pairs ${device} with ${partner}, and ${named} is not in ` +
-          `BRIDGE_ALLOWED_DEVICES — a gadget that may not connect cannot take part in a conversation`
-      );
-    }
-  }
-  return new Map([
-    [device, partner],
-    [partner, device],
-  ]);
-}
 
 /**
  * The lists have to describe the same devices, in both directions.
@@ -551,31 +359,6 @@ function readPartners(env: NodeJS.ProcessEnv, allowedDevices: string[]): Map<str
  * that can never connect, which is nearly always a typo in one of the identifiers.
  * Both are refused at start, where the operator is, rather than at the first turn.
  */
-function requireBindings(allowedDevices: string[], lists: ReadonlyArray<{ what: string; bindings: ReadonlyMap<string, string> }>): void {
-  const missing: string[] = [];
-  for (const device of allowedDevices) {
-    const kinds = lists.filter(({ bindings }) => !bindings.has(device)).map(({ what }) => what);
-    if (kinds.length > 0) missing.push(`${device} has no binding for ${kinds.join(", ")}`);
-  }
-  if (missing.length > 0) {
-    throw new Error(
-      `every device in BRIDGE_ALLOWED_DEVICES must be bound in every list: ${missing.join("; ")}`
-    );
-  }
-  const strangers = new Set<string>();
-  for (const { bindings } of lists) {
-    for (const device of bindings.keys()) {
-      if (!allowedDevices.includes(device)) strangers.add(device);
-    }
-  }
-  if (strangers.size > 0) {
-    throw new Error(
-      `${[...strangers].join(", ")} ${strangers.size === 1 ? "is bound" : "are bound"}, which ` +
-        `BRIDGE_ALLOWED_DEVICES does not name, so no turn could ever be served for it — check the ` +
-        `identifier in every list`
-    );
-  }
-}
 
 /**
  * The endpointer's shipped defaults, and the only copy of them.
@@ -634,28 +417,84 @@ function requireEndpointer(config: {
 }
 
 /**
- * The two settings this change retires, refused wherever they are still recorded.
+ * Where the console is. Required, and with no default, for the reason the platform's
+ * address had none before it: the only obvious default is localhost, which is right
+ * on one machine and silently wrong on every other.
+ */
+function readConsoleUrl(env: NodeJS.ProcessEnv): string {
+  const raw = env.BRIDGE_CONSOLE_URL ?? "";
+  if (raw.trim() === "") {
+    throw new Error(
+      "BRIDGE_CONSOLE_URL must be set: it is where the bridge reaches gadget-console, " +
+        "for example BRIDGE_CONSOLE_URL=http://127.0.0.1:3001. There is no default, because a " +
+        "default would point a deployment at whatever machine happened to be localhost."
+    );
+  }
+  let url: URL;
+  try {
+    url = new URL(raw.trim());
+  } catch {
+    throw new Error(
+      `BRIDGE_CONSOLE_URL must be an absolute URL like http://host:3001, got ${JSON.stringify(raw)}`
+    );
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error(`BRIDGE_CONSOLE_URL must be http or https, got ${JSON.stringify(raw)}`);
+  }
+  if (url.search !== "" || url.hash !== "") {
+    throw new Error(
+      `BRIDGE_CONSOLE_URL must be a base URL without a query or fragment, got ${JSON.stringify(raw)}`
+    );
+  }
+  return (url.origin + url.pathname).replace(/\/+$/, "");
+}
+
+/**
+ * The bridge's own credential for the console: the other half of the boundary a
+ * gadget's secret starts. No length rule — the console issues it, and a short one
+ * is the console's business rather than a reason to refuse to carry it.
+ */
+function readConsoleToken(env: NodeJS.ProcessEnv): string {
+  const token = env.BRIDGE_CONSOLE_TOKEN ?? "";
+  if (token.trim() === "") {
+    throw new Error(
+      "BRIDGE_CONSOLE_TOKEN must be set: it is the bridge's own credential for the console, " +
+        "and it is never sent to a device."
+    );
+  }
+  return token;
+}
+
+/**
+ * Every setting the move to the console retired, refused wherever it is still
+ * recorded.
  *
- * A setting that is no longer read is the one class of configuration mistake that is
- * invisible: the bridge starts, reports itself healthy, and answers a Vietnamese
- * gadget in English. So a leftover `.env` line is an error rather than a harmless
- * one — an empty line too, because the line is what says the operator believes it
- * does something.
+ * A setting that is no longer read is the one class of configuration mistake that
+ * is invisible: the bridge starts, reports itself healthy, and ignores a line its
+ * operator believes is doing something. An empty line is refused too, because the
+ * line is what says the operator meant it.
  *
- * Deliberately narrow: this service does not audit its environment for names it does
- * not know, and will not. What it refuses is exactly the two names that used to be
- * read and are not any more.
+ * Deliberately narrow: this service does not audit its environment for names it
+ * does not know. What it refuses is exactly the names that used to be read.
  */
 function refuseRetired(env: NodeJS.ProcessEnv): void {
   const retired: ReadonlyArray<{ name: string; instead: string }> = [
-    { name: "BRIDGE_LANGUAGE", instead: "BRIDGE_DEVICE_LANGUAGES, one DEVICE=english|vietnamese per gadget" },
-    { name: "BRIDGE_TURN_ENGINE", instead: "BRIDGE_DEVICE_ENGINES, one DEVICE=kokoro|piper|supertonic per gadget" },
+    { name: "BRIDGE_ALLOWED_DEVICES", instead: "add the gadget in the console" },
+    { name: "BRIDGE_DEVICE_PERSONAS", instead: "bind an agent to the gadget in the console" },
+    { name: "BRIDGE_DEVICE_LANGUAGES", instead: "set the language on that agent in the console" },
+    { name: "BRIDGE_DEVICE_ENGINES", instead: "set the engine on that agent in the console" },
+    { name: "BRIDGE_DEVICE_PARTNERS", instead: "pair the two gadgets in the console" },
+    { name: "BRIDGE_DEVICE_SECRET", instead: "the console holds a secret per gadget" },
+    { name: "BRIDGE_PLATFORM_URL", instead: "an agent names its runtime address in the console" },
+    { name: "API_AUTH_TOKEN", instead: "the console holds the runtime credential" },
+    { name: "BRIDGE_LANGUAGE", instead: "set the language on the agent in the console" },
+    { name: "BRIDGE_TURN_ENGINE", instead: "set the engine on the agent in the console" },
   ];
   for (const { name, instead } of retired) {
     if (env[name] === undefined) continue;
     throw new Error(
-      `${name} is no longer read: the language and the engine are bound per gadget now, so bind every ` +
-        `gadget in ${instead}, and remove ${name}`
+      `${name} is no longer read: a gadget's owner, agent and language live in the console now. ` +
+        `${instead}, and remove ${name}.`
     );
   }
 }
@@ -666,28 +505,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
   // gadget has been answered in the wrong language (`refuseRetired`).
   refuseRetired(env);
 
-  // The four device lists are read and cross-checked first, so bindings that
-  // cannot work are reported even when some later value is wrong too.
-  const allowedDevices = readAllowedDevices(env);
-  const devicePersonas = readBindings(env, "BRIDGE_DEVICE_PERSONAS", "persona");
-  const languages = readBindings(env, "BRIDGE_DEVICE_LANGUAGES", "language");
-  const engines = readBindings(env, "BRIDGE_DEVICE_ENGINES", "engine");
-  requireBindings(allowedDevices, [
-    { what: "persona", bindings: devicePersonas },
-    { what: "language", bindings: languages },
-    { what: "engine", bindings: engines },
-  ]);
-  // The vocabulary each binding's value has to be in, checked per entry so the
-  // error names the gadget the operator mistyped rather than only the setting.
-  const deviceLanguages = new Map(
-    [...languages].map(([device, raw]) => [device, asLanguage("BRIDGE_DEVICE_LANGUAGES", device, raw)])
-  );
-  const deviceEngines = new Map(
-    [...engines].map(([device, raw]) => [device, asEngine("BRIDGE_DEVICE_ENGINES", device, raw)])
-  );
-  // Read after the allowlist and checked against it, because a pair is a relation between
-  // two gadgets rather than a binding every gadget needs (D7).
-  const devicePartners = readPartners(env, allowedDevices);
 
   // Read together, because they are one decision, and checked together before the
   // rest of the service is built: an endpointer that can never close a turn is a
@@ -710,20 +527,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
     otaPort: readInt(env, "OTA_PORT", 8003, PORT_MAX),
     wsPort: readInt(env, "WS_PORT", 8001, PORT_MAX),
     publicHost: localIp(env.BRIDGE_PUBLIC_HOST),
-    deviceSecret: readDeviceSecret(env),
-    allowedDevices,
-    devicePersonas,
-    platformUrl: readPlatformUrl(env),
-    apiAuthToken: readApiAuthToken(env),
+    consoleUrl: readConsoleUrl(env),
+    consoleToken: readConsoleToken(env),
+    registryTtlMs: readInt(env, "BRIDGE_REGISTRY_TTL_MS", 60_000),
     framing: readFraming(env),
     // 24000 Hz is the platform's measured TTS output rate and a legal Opus rate;
     // it is also the firmware's own default, so neither side resamples.
     serverRate: readInt(env, "BRIDGE_SERVER_RATE", 24000),
     frameMs: readInt(env, "BRIDGE_FRAME_MS", 60),
     historyTurns: readInt(env, "BRIDGE_HISTORY_TURNS", 20),
-    deviceLanguages,
-    deviceEngines,
-    devicePartners,
     // Four tenths of a second: the top of a natural gap between two people, and quiet
     // enough that a shorter one is a thing to listen for rather than assume (D7).
     handoverMs: readInt(env, "BRIDGE_HANDOVER_MS", 400),
@@ -754,47 +566,3 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
  * that meets it reports the turn as not served, the way a gadget bound to a persona
  * the catalog does not report is reported (`conversation.ts`).
  */
-export function boundLanguage(config: BridgeConfig, deviceId: string): TurnLanguage | undefined {
-  return config.deviceLanguages.get(normalizeDeviceId(deviceId));
-}
-
-export function boundEngine(config: BridgeConfig, deviceId: string): TurnEngine | undefined {
-  return config.deviceEngines.get(normalizeDeviceId(deviceId));
-}
-
-/**
- * Who a gadget converses with, or nothing where the deployment pairs none (D8).
- *
- * `undefined` is the case every deployment but a two-gadget one is in, and it is what each
- * path this change adds is gated on — a bridge that pairs nothing reaches none of them.
- */
-export function partnerOf(config: BridgeConfig, deviceId: string): string | undefined {
-  return config.devicePartners.get(normalizeDeviceId(deviceId));
-}
-
-/**
- * The two gadgets a deployment paired, in the order the deployment wrote them, or nothing.
- *
- * The pair's own list rather than its devices, because the one place that prints it wants
- * the two of them named once, and the map holds both directions of the same relation.
- */
-export function pairedGadgets(config: BridgeConfig): string[] {
-  return [...new Set(config.devicePartners.keys())];
-}
-
-/**
- * The pair a gadget is bound to, as one word for a line an operator reads:
- * `vietnamese/piper`.
- *
- * Read through the lookups above, so a line saying it and a turn declaring it can only
- * disagree if the binding changed between them. Where a binding is missing it says that
- * rather than naming a language, which a started bridge cannot reach (`requireBindings`)
- * and which a default would otherwise disguise as a pair nobody chose.
- */
-export function describeBinding(config: BridgeConfig, deviceId: string): string {
-  const language = boundLanguage(config, deviceId);
-  const engine = boundEngine(config, deviceId);
-  return language === undefined || engine === undefined
-    ? "no language or engine bound"
-    : `${language}/${engine}`;
-}

@@ -1,27 +1,27 @@
-import type { BridgeConfig } from "./config.js";
-
 /**
- * The bridge's side of the boundary, and the only place it crosses.
+ * The bridge's side of the runtime boundary, and the only place it crosses.
  *
- * The platform's credential reaches exactly one kind of request — the ones this
- * bridge makes to the platform, server to server, on a device's behalf. It must
- * not reach any other kind, and in particular nothing this service sends to a
- * device: not the OTA answer, not the hello reply, not a message inside a turn.
- * That is the spec's "A gadget holds no credential the platform accepts" (2.3),
- * and it is why the credential is turned into a header *here* rather than at
- * each call site: one audited place is the difference between an invariant and a
- * promise. A future call that builds its own `Authorization` header is the way
- * this leaks.
+ * A runtime credential reaches exactly one kind of request — the turns this
+ * bridge sends on a gadget's behalf — and must not reach any other kind, and in
+ * particular nothing this service sends to a device: not the OTA answer, not the
+ * hello reply, not a message inside a turn. That is why the credential is turned
+ * into a header *here* rather than at each call site: one audited place is the
+ * difference between an invariant and a promise. A future call that builds its
+ * own `Authorization` header is the way this leaks.
  *
- * The platform's own validator compares the presented token to its configured
- * one with `===`, so the token is passed through byte for byte — no trimming, no
- * case folding, no normalization. Anything helpful here is a credential that no
- * longer authenticates.
+ * The credential arrives with the agent, resolved from the console, so it is not
+ * the bridge's own secret any more — but it still belongs to this service and
+ * never to a gadget.
  *
- * The bridge's first platform call is the persona catalog (3.1), and a turn is
- * 4.1; both take their requests through this module, which is what keeps the
- * claim above from being a promise instead of an invariant.
+ * A runtime compares the presented token byte for byte, so it is passed through
+ * exactly as the console returned it: no trimming, no case folding, no
+ * normalization.
  */
-export function platformAuthHeaders(config: BridgeConfig): Record<string, string> {
-  return { Authorization: `Bearer ${config.apiAuthToken}` };
+export interface RuntimeTarget {
+  baseUrl: string;
+  token: string;
+}
+
+export function runtimeAuthHeaders(runtime: RuntimeTarget): Record<string, string> {
+  return { Authorization: `Bearer ${runtime.token}` };
 }

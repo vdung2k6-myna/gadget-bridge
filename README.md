@@ -1,48 +1,59 @@
-# adaptive-interview-bridge
+# gadget-bridge
 
-Speaks the XiaoZhi gadget protocol in front of the interview platform.
+Speaks the XiaoZhi gadget protocol in front of `gadget-console`.
 
 A XiaoZhi device only knows one way to reach a server: ask an OTA endpoint where
-to connect, then open a WebSocket and say hello. The platform
-(`adaptive-interview-api`) speaks HTTP and nothing else, so this service sits
-between them — it answers the device's OTA request, holds the device's socket,
-and will translate every spoken turn into the platform's turn API.
+to connect, then open a WebSocket and say hello. The console speaks HTTP and
+holds the data; this service answers the OTA request, holds the device's socket,
+and turns every spoken turn into a request to the runtime the gadget's agent
+names.
 
-This repository is being built task by task, and **today it speaks and it listens**:
-the handshake works, each device is bound to a persona, a turn's reply reaches the
-device's own speaker in Opus, and what the person says comes back as a turn of its
-own — closed by this service's own endpointer rather than by anything the device
-sends. A short command said to the gadget is the exception: it is not sent to the
-platform at all, and the bridge carries it out itself. See [Status](#status).
+**The bridge names no device and holds no prompt.** Who owns a gadget, what it is
+called, which agent answers it, what that agent says, which language it is heard
+in and which engine it is spoken through all live in the console. The bridge asks
+the console when a gadget connects, and is given everything a session needs.
+Nothing here is configured per device.
+
+It speaks and it listens: the handshake works, a turn's reply reaches the gadget's
+own speaker in Opus, and what the person says comes back as a turn of its own —
+closed by this service's own endpointer rather than by anything the device sends.
+A short command said to the gadget is the exception: it is not sent to the runtime
+at all, and the bridge carries it out itself.
 
 ## Running it
 
-Node **22 or newer** — the version the platform itself runs, and the one whose
-built-in `fetch` the tests use to call the OTA endpoint. Nothing else is
-required: no database, no build step, no compiler at run time.
+Node **22 or newer** — the version whose built-in `fetch` the tests use. No
+database, no build step, no compiler at run time.
+
+**The console runs first.** The bridge reads every device from it, and a console
+that is not up is a bridge that resolves nobody:
 
 ```bash
+# console, in ../gadget-console
+npm install && npm run db:migrate && npm start        # listens on 3001
+
+# bridge, here
 npm install
-cp .env.example .env      # then set BRIDGE_DEVICE_SECRET — see Credentials
+cp .env.example .env      # then set BRIDGE_CONSOLE_URL and BRIDGE_CONSOLE_TOKEN
 npm start                 # tsx src/index.ts
 ```
 
 `.env` is read by Node itself, so `npm start`, `npm run dev` and a bare
 `node --import tsx src/index.ts` all behave the same. Every value has a default
-except three, which have none on purpose: the two credentials and the platform's
-address — see [Credentials](#credentials) and
-[The platform's address](#the-platforms-address).
+except three, which have none on purpose: the console's address, the console's
+credential, and the ports the flashed device expects — see
+[Credentials](#credentials).
 
 `npm start` starts **both** servers and prints the addresses:
 
 ```
-adaptive-interview-bridge
+gadget-bridge
   ota      http://192.168.1.100:8003/xiaozhi/ota/
   ws       ws://192.168.1.100:8001/xiaozhi/v1/
   framing  v3
   downlink 24000 Hz / 60 ms
-  devices  1 allowed, 1 bound
-  platform token held, never sent to a device
+  console  http://127.0.0.1:3001
+  devices  resolved per connection; none are named here
 ```
 
 | Command | What it does |
@@ -57,605 +68,268 @@ adaptive-interview-bridge
 **OTA — `http://<host>:8003/xiaozhi/ota/`.** The device is flashed with this URL
 (`CONFIG_OTA_URL`), asks it before anything else, and reads the WebSocket address,
 its own token and the framing version out of the answer. A device that cannot
-reach this endpoint reports a network failure rather than "no server", so it
-answers even while the rest of the service is unfinished — but only to a device
-the allowlist names; see [Credentials](#credentials). `GET /` returns the same
-addresses as text, for a human with a browser.
+reach this endpoint reports a network failure rather than "no server". `GET /`
+returns the addresses as text, for a human with a browser.
+
+**Activation — `POST /xiaozhi/ota/activate`.** The firmware's own flow, used as it
+is: an `activation` block in the OTA answer makes the gadget show and speak a
+code, then poll this route until it answers `200`. `202` means the claim is still
+pending; the gadget waits and asks again. See [Claiming a gadget](#claiming-a-gadget).
 
 **WebSocket — `ws://<host>:8001/xiaozhi/v1/`.** Any path is accepted; the
-firmware appends a version segment. On connect the device sends a `hello`, and
-the reply must carry `transport` — without it the firmware fails the connect ten
+firmware appends a version segment. On connect the device sends a `hello`, and the
+reply must carry `transport` — without it the firmware fails the connect ten
 seconds later, with nothing logged on this side. Binary frames are counted and
 logged, and deliberately not answered. A connection whose credential does not
-check out is refused with **401 during the upgrade**: the firmware reads anything
-but a 101 as "server not connected", so the device reports a failure instead of
-believing it was connected.
+check out is refused with **401 during the upgrade**; a connection the console
+cannot resolve is refused with **503**, because a gadget this bridge has not
+resolved must not be served. The firmware reads anything but a 101 as "server not
+connected", so the device reports a failure instead of believing it was connected.
 
 `BRIDGE_PUBLIC_HOST` is the address written into the OTA answer, and it has to be
-one the device can route to. Unset, the bridge picks a LAN address itself and
-logs which one it chose; set it when that pick is wrong (a second adapter, a VPN,
-a machine whose device is on another subnet).
+one the device can route to. Unset, the bridge picks a LAN address itself and logs
+which one it chose; set it when that pick is wrong (a second adapter, a VPN, a
+machine whose device is on another subnet).
 
-### The platform's address
+### The console
 
-`BRIDGE_PLATFORM_URL` is where `adaptive-interview-api` is — for example
-`http://127.0.0.1:4000`. It is required and has no default, unlike the ports
-above: those are addresses this machine serves on, and the flashed device expects
-them. This one is a property of one deployment, and the only obvious default is
-localhost, which is right on a developer's machine and silently wrong everywhere
-else — the bridge would come up looking healthy and reach nothing.
+`BRIDGE_CONSOLE_URL` is where `gadget-console` is — for example
+`http://127.0.0.1:3001`. Required, and with no default: the only obvious default
+is localhost, which is right on a developer's machine and silently wrong
+everywhere else.
 
-The bridge reads `GET /api/personas` from it once at start and caches the result
-(3.1). The read is strict — every entry's five fields are checked, and a payload
-that does not match is an error rather than a best-effort persona — and a read
-that fails is logged without stopping the bridge: the deployment order is
-platform first, then the bridge, and the catalog is re-read before a device is
-declined (3.3). It is the first platform call the bridge makes, and it goes
-through the one place the platform's credential becomes a request
-(`src/platform.ts`).
+The bridge asks it once per connection, at OTA and again at the upgrade, and the
+answer carries everything the session needs: whether the gadget is owned, its own
+secret, its agent (prompt, topics, answer mode, language, engine, its runtime's
+address and credential, and the account's own model where it names one), its
+partner, and the turns already recorded.
 
-### What a device is bound to
+Once the tool channel is up, the bridge reports back what the gadget declared — its
+`tools/list` catalogue, names and descriptions — so the console can show it on the
+device's page. That report is fire-and-forget: a catalogue is bookkeeping, and a
+session never waits on one.
 
-Four lists in `.env`, and the device half of each is read exactly the way
-`BRIDGE_ALLOWED_DEVICES` reads its own, so they can all be pasted from the same place:
+The OTA request also carries the firmware's own system-info body: the board type
+and name, the chip, flash, the display, and the application version. The bridge
+reads it within a 32 KiB bound and forwards only those facts — the partition
+table, the ELF hash, the MAC address, the UUID, the IP, the SSID and any cellular
+identifiers are dropped before anything leaves the process, and the body itself is
+never logged. That report is fire-and-forget too: a body that is absent, oversized
+or unreadable leaves the OTA answer exactly as it was.
 
-| List | What it binds | Values |
-| --- | --- | --- |
-| `BRIDGE_DEVICE_PERSONAS` | the persona that answers it | a catalog id (`GET /api/personas`) |
-| `BRIDGE_DEVICE_LANGUAGES` | the language it is heard and answered in | `english`, `vietnamese` |
-| `BRIDGE_DEVICE_ENGINES` | the engine it is spoken through | `kokoro`, `piper`, `supertonic` |
+The same answer may carry a `firmware` block — `version`, a URL on the console, and
+`force` — when the console says the device should be running something other than
+what it reported. It is included **only for an owned device**; an unclaimed gadget
+gets its code and nothing else. The URL is the console's own and is never composed
+here or taken from a request. `force` is translated into the number the firmware
+reads: `1` installs regardless of version order, `0` lets its own comparison decide.
+A block in a shape the firmware cannot use is dropped with a warning, and the session
+is not refused over it.
 
-The device half is normalized the way the allowlist normalizes its own —
-`b8:1f:3f:4a:9b:01`, `B8-1F-3F-4A-9B-01` and `b81f3f4a9b01` are one device — and the
-whole of a turn's `language` and `engine` comes from these two lists, one value per
-device (see [The turn](#the-turn) below).
+A resolution is reused for `BRIDGE_REGISTRY_TTL_MS` (default 60 s), which is also
+how long a released gadget may keep working — the bound is stated rather than
+implied.
 
-All of them must describe the same devices as the allowlist, in both directions, and
-the bridge refuses to start otherwise. An allowed device with no persona could connect
-and never be answered; one with no language or engine could never be heard or spoken to;
-and a binding for a device the allowlist does not name is configuration for something
-that can never connect, and is nearly always a typo in one of the identifiers. The
-refusal names the device *and* the kind of binding it is missing, because three lists
-are three things to get wrong. One value per device per list, because a gadget speaks as
-exactly one persona, is heard in one language and is spoken through one engine — and a
-device bound to an identifier the catalog does not report is never answered as a
-different persona (the bridge says so at start rather than quietly picking one).
+**An unreachable console fails closed.** Nothing is served from a remembered
+answer: a connection that cannot be resolved is refused, and a session already
+resolved runs to its end, because what it needs is already held.
 
-The persona half is the catalog's own identifier and is carried exactly as written,
-because an identifier the catalog does not report is meant to be a miss rather than a
-near-miss this service guesses at. The other two are the endpoint's own vocabularies, and
-a value outside them is refused at start rather than folded: `vi` is not a near-miss for
-`vietnamese` in a service whose failure mode is a transcript in the wrong script, and
-`Supertonic` is not one for `supertonic` in one that speaks through a different voice
-without saying so.
+### Claiming a gadget
 
-A persona contributes three fields to a turn. They are the platform's own request
-fields, renamed in `src/personas.ts` and nowhere else:
+A gadget nobody owns is not refused — it could not then receive a code. Instead:
+its OTA answer carries an `activation` block, the gadget shows the six digits and
+speaks them aloud, and the person enters the code in the console. Entering it
+records a request: the bridge's poll of `/activate` keeps answering `202` while an
+admin decides, and answers `200` once the request is approved — which is what lets
+the gadget connect.
 
-| Turn field (`POST /api/voice-agent/stream`) | Persona field (`GET /api/personas`) |
+The code is short-lived, single-use, rate-limited, and shown *and* spoken by the
+physical gadget. It is not a strong barrier: the identity it protects is a
+`Device-Id` the gadget declares, so whoever knows that identifier can ask for the
+same code. What the code narrows is the window, and what the pairing with the
+console adds is an owner. The firmware also implements a hardware challenge (an
+HMAC over an eFuse key), which would close that gap; it is not used here because
+it needs keys recorded when the board was made.
+
+### What an agent is
+
+An agent is everything a turn needs, and it lives in the console:
+
+| Agent field | What it decides |
 | --- | --- |
-| `systemPrompt` | `defaultPrompt` |
-| `enabledTopics` | `knowledgeTopics` |
-| `answerMode` | `answerMode` |
+| `systemPrompt` | what the gadget says |
+| `topics` | the search scope its runtime may read |
+| `answerMode` | `generate`, or `material` — read from its topics |
+| `language` | how the person is heard, and how the reply is spoken |
+| `engine` | `kokoro`, `piper` or `supertonic` |
+| `runtime` | the base URL and credential that answer it |
+| `model` | the account's own OpenAI-compatible endpoint, where it names one; otherwise absent, and the runtime's default answers |
 
-Those three are the whole of what the bridge takes from a persona, and the split
-is worth stating plainly, because "which fields come from where" is the question
-a new binding raises:
+The **voice** is not on that list, and deliberately: the runtime resolves it from
+`(engine, language)` itself. The console therefore offers no voice picker — a
+setting that would not be honoured is worse than no setting. One agent may serve
+several devices; a device has at most one agent and at most one partner.
 
-| A turn's field | Comes from | Named in |
-| --- | --- | --- |
-| `systemPrompt`, `enabledTopics`, `answerMode` | the persona | the platform's catalog, selected by `BRIDGE_DEVICE_PERSONAS` |
-| the device's identity (`Device-Id`) | the device | `BRIDGE_ALLOWED_DEVICES`, and the bindings above |
-| `language`, `engine` | the device's own bindings | `BRIDGE_DEVICE_LANGUAGES`, `BRIDGE_DEVICE_ENGINES` |
-| `audio` | the device, per turn | the device itself — 6.1 |
-| `history` | the conversation so far | the bridge, per device — 4.2 |
-
-A device contributes its identity and never its character: it selects which
-persona answers, and nothing about what that persona says. The bridge holds no
-prompt, topic list or mode of its own. `label` and `emoji` are deliberately not
-carried — the bridge renders nothing (D8), and a label exists to be drawn on a
-screen this service does not paint.
-
-### Two gadgets that hold a conversation
-
-`BRIDGE_DEVICE_PARTNERS` records one pair, as `DEVICE=DEVICE` — for example
-`b8:1f:3f:4a:9b:01=3c:0f:02:d0:7e:fc`. **Off unless set**, and at most one pair, so a deployment
-that records none reaches none of this and behaves exactly as it did before the setting existed.
-
-With a pair recorded, the two gadgets take turns. When a turn on one has been answered, the bridge
-asks its partner for a turn whose input is **that reply's own words**, as text, and holds the answer
-until the gadget that was speaking reports that it has begun listening — its own `listen start`,
-0.04–0.26 s after its speaker stops (measured 2026-10-17). The answer is already produced by then: a
-reply's text is complete 12–44 s before its audio is, because the bridge paces the audio in real time
-and the platform has answered long before. So the silence between the two is `BRIDGE_HANDOVER_MS`
-(four tenths of a second when unset) and not the platform's latency.
-
-Three things about it are deliberate and worth knowing before turning it on:
-
-- **The question does not travel through the room.** Each gadget still speaks and still hears the
-  other, but the turn its partner is asked with is the text the first reply was made of, rather than
-  what the partner's microphone made of hearing it. Both reasons are measured: a turn built from the
-  other gadget's audio pays the transcription of the whole question before it can start — the largest
-  part of the wait — and the transcription loses words (`chào bạn` came back `ào bạn`).
-- **While a turn of the exchange is in flight, neither microphone is judged.** What a gadget hears then
-  is its partner, whose words are already arriving as a turn of their own, and a lull between that
-  partner's sentences is not a person stopping. That is what the endpointer's own
-  `BRIDGE_VAD_SILENCE_MS` and `BRIDGE_VAD_SPEECH_WINDOW_MS` cannot do for it: a window that has heard
-  half a second of anything is armed to close on three seconds of quiet for a whole minute. Between
-  two turns the room is free again, so a person who speaks then is heard as they always were.
-- **A person is heard through the wake word, and the wake word ends the exchange.** It cancels the
-  turn in flight and drops the reply that was prepared, because a person who stops a reply has taken
-  the floor and an answer to half a question is the exchange continuing against them.
-
-An exchange with nobody in the room ends on `BRIDGE_SESSION_IDLE_MS` — a prepared turn holds that
-window while it waits for the floor, so a long reply cannot close the session waiting for it. And a
-gadget that never reports having stopped (a board that crashed mid-reply) does not hold the floor
-forever: the bridge takes it as free once its own estimate of that gadget's audio has passed, which is
-the same deadline the drain guard already models.
+An engine or language the runtime does not name is refused when the agent is
+saved, and again when it is resolved: the runtime folds an unknown value into one
+of its own rather than refusing it, so those two moments are the only places the
+mistake is visible.
 
 ### The turn
 
-A turn goes to `POST /api/voice-agent/stream` on the platform, as multipart form
-data — the same request the browser makes, field for field (D2). The endpoint looks
-no persona up, so everything it needs to answer as this gadget's persona is in the
-request: the persona's three fields above, the conversation so far, and the
-person's input as an audio file or as text. It is sent with `speak=1`; a turn sent
-unspoken comes back with no audio on any sentence, and the gadget then sits silent
-with nothing in a log to say why.
+A turn is the same request the browser makes to the runtime: multipart form data
+carrying the agent's fields, the gadget's language, the conversation so far, and
+the person's input as either an audio file or text. The runtime is stateless and
+self-describing — it looks no agent up — so everything it needs is in the request.
 
-**`language` is required on every turn, and it is one of the device's own bindings.**
-It comes from `BRIDGE_DEVICE_LANGUAGES` for the gadget taking the turn, so two gadgets on
-one bridge are heard and answered in different languages. The endpoint reads an absent or
-unrecognized value as `english` — not as "detect", as `english` — so a turn that drops the
-field does not lose a hint, it pins the transcriber, and it fails silently. A code (`vi`)
-is unrecognized in the same way. This is a correctness requirement rather than a
-preference: left to detect, the
-transcriber decodes short Vietnamese as Chinese, and the persona then answers
-someone who never spoke it (D12). Measured on one utterance taken from the device
-by the rig, the same bytes came back as `"ao"` with `language=vietnamese`, as
-`"Oh."` with `language=english`, and as `"哦。"` with the language left to detection.
-
-The language a turn declares is also the language the gadget's own spoken commands are
-matched against (`src/commands.ts`), and the same value is read in the two places that
-decide what a turn was: the match that drops a recognised command before the platform
-answers it, and the match that keeps it out of the conversation. One lookup answers both,
-so they cannot disagree about a turn.
-
-`engine` is stated per device, rather than derived from the language: it comes from that
-device's own binding in `BRIDGE_DEVICE_ENGINES`. It is not a preference, and the
-difference matters: the endpoint folds an absent or unrecognized engine to Kokoro *before*
-it consults its own default, so an omitted field asks for the engine this deployment has
-left rather than for no preference. A value that is not one of the three the endpoint
-accepts is refused at start rather than folded, so a typo is an error rather than a
-quieter change of voice. The bridge still names no voice — a persona carries no voice
-field (D3) — and which voice an engine resolves to, per language, stays the platform's:
-"What a gadget sounds like" below is where the deployment's answer is recorded.
-
-The reply is a stream of server-sent events — `user`, `sentence`, `text`, `tool_call`,
-`music`, `notice`, `error`, `done` — and it is read as one. The endpoint emits each
-sentence's audio as that sentence is finished, so speech begins before the reply is
-complete (D4); a client that waited for the body would have thrown the property away,
-which is why the bridge hands each event to its caller as it arrives.
-
-`tool_call` is the model asking for something only this service can do — one of the
-tools the bridge declared in the turn's `tools` field — and the platform holds the turn
-open for the answer, eight seconds by default, so it is the one event here that cannot
-be left unanswered. `music` is the other library answering: a track the *platform* will
-play through its client, which this service does not model and drops in the fall-through
-that every unmodelled event takes. Both are "Two libraries, one turn" below.
-
-### Two libraries, one turn
-
-A turn is offered more than one toolkit, and the model is told which party answers each
-by the first word of a tool's name. Three prefixes are in play, and they are the whole
-of the routing:
-
-| Prefix | Whose | Answered by | Arrives here as |
-| --- | --- | --- | --- |
-| `self.` | the gadget's own controls, read off the catalog it reports | the gadget, over the device socket | a `tool_call`, which the bridge forwards |
-| `bridge.` | this service's music — `bridge.list_music`, `bridge.play_music`, `bridge.stop_music` | this service, without leaving it | a `tool_call`, which the bridge answers itself |
-| `platform.` | the platform's own music — `platform.list_music`, `platform.play_music` | the platform, inside the round that asked | **nothing**: no event is sent, because there is nobody else to ask |
-
-The last row is the one to hold on to. A `platform.*` call never reaches this service:
-the platform answers it in the round it was asked, before any event is emitted, so the
-bridge's tool handling is never consulted for one, and a bridge waiting on an event for
-it would be waiting on an event that is not coming.
-
-**And the two music libraries are two libraries.** This service reads `BRIDGE_MUSIC_DIR`
-and decodes the track itself to play it through the gadget's speaker; the platform reads
-its own `MUSIC_LIBRARY_DIR` and serves the file to whoever is on the connection. They
-are different directories, they may hold different files, and they do not have to agree
-about what a playable track is — the bridge decodes MPEG only, so a `.flac` in its
-directory is refused at the call ("it is not an mp3 this bridge can play", `src/music.ts`),
-while the platform's library admits every container its audio mount types as audio.
-Nothing reconciles the two lists, and nothing should: each library is offered under its
-own prefix, and the model chooses between them the way it chooses anything else.
-
-So one request can be heard in either of two rooms. `bridge.play_music` puts music out
-of **the gadget's** speaker, in one bracket, on the device's own clock, at the level
-`BRIDGE_MUSIC_GAIN_DB` records. `platform.play_music` sends a `music` event to the client
-that made the turn, and that client fetches the file from the platform's mount and plays
-it **there** — the browser, for a browser turn — which is why this service drops the
-event rather than handling it: what it names is not on a socket this service holds.
-Neither is a fallback for the other, and **on a device turn the platform's is the one that
-cannot be heard.** A turn this service sends carries `tools`, so the platform offers its
-own music tools *beside* these — both libraries at once, in one list — and all that
-separates them is their descriptions: this service's says "through the device's own
-speaker", the platform's says "through the person's own client". On a device turn the
-person's own client **is this service**: the `music` event arrives on the turn's own
-stream, where the handler above does not model it and drops it. A model that reaches for
-`platform.play_music` here is told the track is playing, says so in its reply, and nothing
-is heard; `bridge.play_music` is the only one of the two that reaches the gadget's
-speaker. Both descriptions are true and the choice between them is still the model's —
-what it cannot know is which one this deployment can make audible. A deployment may
-configure one library, both, or neither, and one whose bridge holds no music simply
-offers no `bridge.*` tools: no other part of the feature depends on it.
-
-### What a gadget sounds like
-
-A persona decides *what* is said, never *who* says it. It carries no voice field
-(D3), and the platform resolves one from the engine and the language alone —
-`resolveVoice(engine, language)` in `adaptive-interview-api`'s
-`src/lib/audio/text-processing.ts`, which reads a configured name and falls back
-to `DEFAULT_VOICE` only when that name is empty. The bridge supplies the engine and the
-language, each from the gadget's own binding, and names no voice.
-
-So the voice is the **platform's** configuration, not this service's, and this
-deployment resolves to:
-
-| The gadget speaks | Engine | Voice | Set by |
-| --- | --- | --- | --- |
-| English | Supertonic | `M1` | `SUPERTONIC_VOICE_ENGLISH` |
-| Vietnamese | Supertonic | `example_m2` | `SUPERTONIC_VOICE_VIETNAMESE` |
-
-Read from `adaptive-interview-api`'s `.env` on 2026-10-09; the defaults in
-`src/lib/config/` are different values, so a deployment that sets none of these
-sounds like neither of the rows above. A gadget's **voice** is that file's to
-change, and this service has no voice setting by design — a voice it could name
-would be a second place for the same decision to live. Its **engine** is this
-service's to state, per gadget, in `BRIDGE_DEVICE_ENGINES`, because the platform's own
-fallback is unreachable: a turn that omitted the field would ask for Kokoro. So how a
-deployment sounds is one decision spread over two repositories — the engine here, the
-voices there — and binding a gadget to one without a voice configured there is a pairing
-that repository's voices have to answer for.
-
-**Two gadgets bound to the same pair sound identical; two bound to different pairs do
-not.** That is what binding the pair per gadget is for: one gadget can be heard and spoken
-through a pair the other is not. What is still not possible is two *voices* out of one
-pair — `resolveVoice` is a function of the engine and the language alone, so two gadgets
-naming the same two values are one voice reading two different prompts. Whether a persona
-should carry a voice of its own is a platform decision this service does not make, and a
-voice setting here would be a second place for a decision the platform already owns.
-
-One hazard worth knowing, because it fails quietly rather than loudly. An empty
-voice name does not error — `resolveVoice` returns `DEFAULT_VOICE` instead — and
-this deployment does not set `DEFAULT_VOICE`, so it falls to the code default
-`F1`. With the engine now Supertonic, `F1` is a name of the right catalogue, so
-clearing `SUPERTONIC_VOICE_VIETNAMESE` does not fail the turn; it answers in `F1`
-instead of the deployment's own voice, with nothing in the log to say so. While the
-bridge asked for Kokoro the same fallback was worse — a Supertonic name handed to
-another engine's catalogue — and that is what it would become again if a gadget were
-bound back to Kokoro in `BRIDGE_DEVICE_ENGINES`. Where the engine *is* another one,
-the same empty name is a 400 naming the voices that exist rather than a quiet wrong
-voice: `F1` is a name of Supertonic's catalogue and of nobody else's.
-
-### The conversation
-
-The endpoint keeps no conversation (D2), so the bridge keeps one, per device, and
-sends it back with every turn. A gadget that was not sent its own history would be a
-gadget with no memory: the person repeats themselves, and the persona meets them as
-a stranger on every turn while the log shows nothing wrong.
-
-It is kept **per device**, not per socket. A device that drops its connection and
-reconnects is the same gadget, and starting it over is a thing the person
-experiences as the device forgetting. Nothing is written to disk, so restarting the
-bridge is a fresh conversation — which is the honest reading of a service that
-holds no database, and is worth knowing before you deploy it.
-
-Both sides of a turn are recorded, and neither is guessed. The person's side is the
-stream's own `user` event, which is the platform's transcription of what they said
-and the only place it exists — on an audio turn, nothing the bridge sent contains
-it. The gadget's side is the reply text, which the bridge already has because it is
-about to speak it.
-
-A turn's history is **bounded** to its most recent `BRIDGE_HISTORY_TURNS` turns
-(default 20), dropping the **oldest** first. Unbounded, it grows for as long as the
-conversation runs and the request is eventually refused — a failure that lands on
-some turn in the middle, with nothing in it to say the history was the cause. The
-default matches the platform's own `VOICE_AGENT_MAX_HISTORY`, so what the bridge
-sends is what the platform would have kept anyway; raising one without the other
-only grows a body that is about to be cut.
-
-Turns are dropped **whole**, so the history never opens on the gadget answering a
-question that is no longer in it. The current turn is not part of what is sent: the
-platform appends it to the history itself, so sending it as well would put the same
-question to the model twice.
-
-### Time to first audio
-
-Measured on the development board on 2026-10-06, over four spoken turns in one
-session (7.1). The clock is the bridge's own — seconds since it started, the same
-stamp as every line in its log.
-
-| | |
+| A turn's field | Comes from |
 | --- | --- |
-| Board | ESP32-S3-WROOM-1 N16R8, board type `bread-compact-wifi-lcd` (`docs/hardware.md`) |
-| Network | device on Wi-Fi at `192.168.1.50` → the bridge at `192.168.1.100:8001`, one LAN; bridge → the platform at `127.0.0.1:4000`. `8001` is the default `WS_PORT`, so nothing has to be set to get it |
-| Model | `deepseek-v4.1-flash:cloud` through Ollama — a cloud model, so the reply leg leaves this machine |
-| Speech in | `stt` on audiocpp |
-| Speech out | Vietnamese, through the engine that board is bound to in `BRIDGE_DEVICE_ENGINES` — Supertonic at the time of this measurement — voice `example_m2` (`SUPERTONIC_VOICE_VIETNAMESE`); English resolves `M1` |
+| `systemPrompt`, `enabledTopics`, `answerMode` | the agent |
+| `language`, `engine` | the agent |
+| the device's identity (`Device-Id`) | the device, and the console's record of it |
+| `audio` | the device, per turn |
+| `history` | the conversation so far: memory, seeded from the console |
+| `llmBaseUrl`, `llmModel`, `llmApiKey`, `llmTemperature` | the agent's own model, when it names one; all four absent otherwise, so the runtime asks its default exactly as before |
 
-Two anchors, because neither end of this is logged directly. The endpointer closes a
-turn 900 ms after the person's last word, so **the end of speech is the turn's close
-minus the silence threshold** — derived, not read. The first audio is the
-`sentence 0` line, written just after that sentence's first frame went to `socket.send`
-(`src/speech.ts:239`, the send; `249`, the line).
+The request goes through one place, `src/platform.ts`, where the runtime's
+credential becomes a header. It is the one credential that reaches the runtime,
+and it never reaches a device.
 
-| Turn | closed | transcribed | `sentence 0` sent | end of speech → first audio | closed → first audio |
-| --- | --- | --- | --- | --- | --- |
-| 1 | 336.13 | 338.03 | 343.78 | **8.55 s** | 7.65 s |
-| 2 | 362.88 | 364.68 | 370.36 | **8.38 s** | 7.48 s |
-| 3 | 383.62 | 385.65 | 390.24 | **7.52 s** | 6.62 s |
-| 4 | 546.81 | 548.49 | 551.94 | **6.03 s** | 5.13 s |
+### The conversation, and its record
 
-**6.0–8.6 s** from the person's last word; 7.6 s across the middle of the four. That
-spread is the reproducibility check 7.1 asks for: four runs, no change to the
-deployment between them, agreeing to within 2.5 s.
+The runtime keeps no conversation, so the bridge carries one per device, bounded
+to the most recent `BRIDGE_HISTORY_TURNS` exchanges. At `hello` the bridge seeds
+that conversation from the turns the console already holds, so a restart does not
+make the gadget forget; each served turn is appended to memory **and posted to the
+console**.
 
-The shape of the wait is the same every time. The 900 ms silence threshold is this
-service's own and is spent by construction; the rest splits like this.
+That post is fire-and-forget. The reply has been spoken by the time the console is
+told about it: a console that is slow, down, or refusing never delays a turn or
+cuts a reply short. A lost record is the accepted cost of never trading speech for
+durability.
 
-| Turn | silence threshold | upload + transcribe | reply → its first sentence's audio |
-| --- | --- | --- | --- |
-| 1 | 0.90 s | 1.90 s | 5.75 s |
-| 2 | 0.90 s | 1.80 s | 5.68 s |
-| 3 | 0.90 s | 2.03 s | 4.59 s |
-| 4 | 0.90 s | 1.68 s | 3.45 s |
+A turn is recorded as text — the runtime's transcription of the person and the
+reply the bridge spoke — and never as audio. Records expire after the console's
+retention period, and are deleted when the gadget is released.
 
-So about a fifth of the wait is the bridge deciding the person has stopped, a
-quarter is the platform hearing them, and **the large half is the reply being
-generated and its first sentence spoken** — the leg that runs through the cloud
-model. The bridge's own work does not show up as a stage of its own here; it is
-inside those two legs rather than between them.
+### Two gadgets that hold a conversation
 
-One thing the figures are not. `sentence 0` marks the moment the sentence's first
-frame went to `socket.send`, not the moment the gadget played it; the hop in between
-is one LAN segment. That is a send-side marker all the same, and the figures above
-were measured before the downlink was paced (5.6, D16) — which does not move it, since
-the pacing sends a turn's first frames the instant the bracket opens and spreads only
-the rest. What the pacing changed is the **tail**: a turn is still on its way when the
-platform has finished producing it, so `tts stop` follows the turn's last frame rather
-than its last sentence, which is what lets the gadget play the whole reply rather than
-the first 1.2 s of it. Delta 5 of `docs/device-protocol.md` is the measurement that
-made the case for it; the confirmation on a device is 5.6's own. That confirmation is
-of the **tail** — the whole reply playing rather than its first 1.2 s — and not of the
-drain estimate 6.6 arms, which is anchored on the turn's own clock and so is accurate
-only while the platform produces no slower than realtime. A turn on 2026-10-07 where
-it did not is why D16's claim carries that condition.
+When the console pairs two devices, a turn on one is followed by a turn on its
+partner whose input is the reply's own text — not a transcription of what the
+partner heard. The partner's turn is asked while the first is still speaking and
+spoken when the first reports it has begun listening, plus `BRIDGE_HANDOVER_MS`.
+While an exchange is in flight neither microphone is judged, and the wake word
+ends it. A deployment that pairs nothing reaches none of it.
 
-### The bound
+### Music, and commands answered here
 
-The deployment's bound is **10 s from the person's last word to the first audio of the
-reply** (7.2). The number is set by the rule `design.md` gives this bar — real margin
-over the worst observed rather than the best — against the 8.55 s worst above, and
-**every turn recorded here is inside it**.
+`BRIDGE_MUSIC_DIR` names a directory the bridge lists when asked, and empty means
+this deployment has no music at all. Two spoken commands — play a track, stop —
+are answered by the bridge itself rather than sent to the runtime; anything the
+directory cannot settle (a name several files carry, or none) falls through as an
+ordinary utterance. `BRIDGE_MUSIC_GAIN_DB` is the level a track is played at, as a
+difference from the file, so a track does not drown the voice it plays beside.
 
-The paced deployment was measured again on the same board in one session, after the
-downlink was rewritten (5.6). Same clock and the same two anchors as the table above:
+The same is true of the gadget's own settings: a short command that changes
+volume, brightness or the like is carried out here. A command is not a turn of the
+conversation, and recording it would put a question nobody put to the model into
+the history.
 
-| Turn | closed | transcribed | `sentence 0` sent | end of speech → first audio |
-| --- | --- | --- | --- | --- |
-| 1 | 342.10 | 343.87 | 346.30 | **5.10 s** |
-| 2 | 453.98 | 455.63 | 458.80 | **5.72 s** |
-| 3 | 481.20 | 483.26 | 486.52 | **6.22 s** |
-| 4 | 605.96 | 608.09 | 611.72 | **6.66 s** |
+### The endpointer, and the session
 
-Where the rest of the wait is — a bound says only that the gadget is acceptable, not
-why it is not faster:
+The firmware sends no `listen stop`, so the bridge decides when a person has
+finished speaking: a gate on the room's own noise floor, a minimum amount of
+speech, and a silence threshold, all of which are settings rather than constants
+(`BRIDGE_VAD_*`, `BRIDGE_MAX_TURN_MS`). A window in which nobody spoke produces no
+turn however loud the room is.
 
-| | silence threshold | upload + transcribe | reply → its first sentence's audio |
-| --- | --- | --- | --- |
-| paced, 4 turns | 0.90 s | 1.65–2.13 s | 2.43–3.63 s |
-| above, 4 turns | 0.90 s | 1.68–2.03 s | 3.45–5.75 s |
+A session nobody speaks into ends after `BRIDGE_SESSION_IDLE_MS`, measured by what
+a person was behind and by what the bridge still has to play — not by the bytes
+arriving, because a gadget streams whether or not anyone is speaking. Ending a
+session leaves the gadget able to take another.
 
-The bridge's own two legs are the same in both runs and are about a quarter of the
-budget: deciding the person has stopped, and hearing them. What moved is the third —
-the reply generated and its first sentence synthesised — which the bridge does not own,
-and which is therefore the stage the excess over a snappier figure falls in. That is
-also the leg the drift `design.md` records as unexplained sits in: the spike's own runs
-disagreed on this one and not on the other two. Narrowing it is a platform question.
+## A load test
 
-The hop from `sentence 0` to the gadget playing it is in neither leg — one LAN segment,
-and one the bridge cannot see. That is why these are send-side figures. What closed
-5.6 was the gadget's own ear instead, and it heard each reply whole.
+`scripts/load-test.ts` drives the running services and reports what came back. Two
+modes, because a deployment has two ceilings:
 
-### Adding a device
+```bash
+# How many turns the runtime can answer at once: the same request the bridge
+# sends, text instead of audio and speak=0, so the model slot is the only thing
+# being measured.
+RUNTIME_TOKEN=… npx tsx scripts/load-test.ts runtime --count 12
 
-Four lines in `.env`, and no code:
+# …and with an account's own model, the four fields the bridge would send:
+RUNTIME_TOKEN=… npx tsx scripts/load-test.ts runtime --count 12   --llm-url http://127.0.0.1:11434/v1 --llm-model deepseek-v4.1-flash:cloud --llm-key ollama
 
-1. **`BRIDGE_ALLOWED_DEVICES`** — add the device's Device-Id, which is the board's
-   MAC in any spelling (`b8:1f:3f:4a:9b:01`, `B8-1F-3F-4A-9B-01` and
-   `b81f3f4a9b01` are one entry).
-2. **`BRIDGE_DEVICE_PERSONAS`** — add `DEVICE=PERSONA`, the same identifier and a
-   persona id the catalog reports. Read the ids from `GET /api/personas`, or the
-   list the bridge prints at start.
-3. **`BRIDGE_DEVICE_LANGUAGES`** — add `DEVICE=english|vietnamese`: the language
-   this device is heard, answered and commanded in.
-4. **`BRIDGE_DEVICE_ENGINES`** — add `DEVICE=kokoro|piper|supertonic`: the engine
-   its replies are synthesized with. Check that the platform has a voice configured
-   for that engine *and* that language — see
-   [What a gadget sounds like](#what-a-gadget-sounds-like) — because the bridge
-   cannot know which models a deployment holds.
+# How many device sessions the bridge will hold: real upgrades with real tokens,
+# a hello, and nothing else. An identifier nobody owns still yields the secret its
+# token is derived from, so no gadget is needed — but each leaves a pending claim
+# in the console until CLAIM_APPROVAL_TTL_MS.
+npx tsx scripts/load-test.ts bridge --count 50
+```
 
-The bridge refuses to start unless the allowlist and all three lists name the same
-devices, and the refusal names the device and the kind of binding it is missing — so a
-half-finished set is reported at start where you are, rather than at the device's first
-turn. Then restart it: the device is provisioned the next time it asks the OTA endpoint,
-needs no reflash, and can be revoked by removing its entry from every list.
+`--console`/`--token` override the bridge's own `.env`; `--runtime-token` is the
+runtime's credential, which the bridge no longer holds. The bridge's RSS is the
+number to watch for connection capacity, and it comes from the OS, not from the
+script.
+
+What the numbers mean: a turn holds a model slot only while its reply is being
+produced, and `OLLAMA_MAX_CONCURRENT_REQUESTS` (default 12) bounds how many do at
+once. Beyond that turns queue, and one that waits past the 120 s chat timeout fails.
 
 ## Credentials
 
-Two values, and the boundary between them is the point of the service. (The
-platform's address is the third required value, and it is not a secret — see
-[The platform's address](#the-platforms-address).)
+Three credentials exist, and none of the last two ever reaches a gadget.
 
-| Where | What it holds | What it can do with it |
+| Credential | Held by | What it does |
 | --- | --- | --- |
-| The device | One opaque token, per device, written to its NVS by the OTA answer | Connect to this bridge, as itself |
-| The bridge (`.env`) | `BRIDGE_DEVICE_SECRET` — the secret every device token is derived from | Issue a token for any device on the allowlist, and verify any device's |
-| The bridge (`.env`) | `API_AUTH_TOKEN` — the platform's own credential | Call the platform, on the device's behalf |
-| The platform | Nothing about devices at all | — |
+| A gadget's secret | the console, one per device | the bridge derives the gadget's socket token from it (`HMAC-SHA256(secret, "device:" + id)`) |
+| `BRIDGE_CONSOLE_TOKEN` | the bridge | authenticates every `/api/bridge/*` call; never sent to a device |
+| A runtime's token | the console, attached to the agent | authenticates a turn; sent only to the runtime |
+| An account's LLM key | the console, encrypted | names the model that answers a turn; carried with it to the runtime, never to a device |
 
-**The device's token** is `HMAC-SHA256(BRIDGE_DEVICE_SECRET, "device:" + its
-Device-Id)`, base64url. It is derived rather than stored, so there is no token
-database: adding a device is naming it, revoking one is un-naming it, and a
-restart issues the same tokens it issued before rather than rotating every
-device's credential in the field. It is issued by the OTA endpoint and presented
-as `Authorization: Bearer <token>` on connect — both ends of that are the
-firmware's own behaviour, not something invented here.
+The gadget's socket token is derived, not stored, so a restart issues the same
+token it issued before. Releasing a gadget replaces its secret in the console, so
+its old token stops working and no other device's does.
 
-**`BRIDGE_DEVICE_SECRET` is required and has no default.** A bridge without one
-refuses to start. Whoever holds it can connect as any device on the allowlist, so
-it must never be on a device, in a log, or reused between deployments. Generate
-one with:
-
-```bash
-node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
-```
-
-**`API_AUTH_TOKEN` is the platform's credential, and it is required too.** It is
-the other half of the same boundary: a gadget authenticates to *this* service, and
-this service authenticates to the platform. Copy it from `adaptive-interview-api`'s
-`.env` and never onto hardware. It is carried unchanged — the platform compares it
-byte for byte, so there is deliberately no length rule here and no trim, since a
-tidied token is one that no longer authenticates. It becomes a request in exactly
-one place (`src/platform.ts`), and no code path that answers a device reads it; the
-OTA answer and the hello reply are both asserted not to carry it. The bridge holds
-it from task 2.3 and first *uses* it in 3.1, when it reads the persona catalog.
-
-**`BRIDGE_ALLOWED_DEVICES` names the devices**, by Device-Id (the board's MAC).
-Separators and case do not distinguish devices, so `b8:1f:3f:4a:9b:01`,
-`B8-1F-3F-4A-9B-01` and `b81f3f4a9b01` are one entry. **Empty means nobody**: a
-device is allowed because it is named, and a bridge with nothing named refuses
-every device, at the OTA endpoint and at the socket alike. The service says so at
-startup when the list is empty. Every device named here must also be bound to a
-persona, a language and an engine — see
-[What a device is bound to](#what-a-device-is-bound-to) — and the bridge refuses to
-start unless the allowlist and all three lists name the same devices.
-
-**For an operator: where each secret lives.** The device holds one opaque token,
-per device, written into its NVS by the OTA answer — and it is worthless to the
-platform, which has never seen a value like it. The 16 KB NVS image read from the
-board we run holds neither the platform's token nor the secret every device token
-is derived from, and none of the 59 printable strings in it is accepted by the
-platform API. The bridge holds **both** secrets: `BRIDGE_DEVICE_SECRET`, which
-mints and verifies every device token, and `API_AUTH_TOKEN`, the platform's own
-shared credential, which is turned into a request in one place and read by no code
-path that answers a device. The platform holds nothing about devices at all — no
-device table, no per-device token, no allowlist — and sees the bridge as a single
-API client.
-
-**The bridge is internet-facing, and must not be run without its credential
-flow.** A device reaches the OTA endpoint and the socket over whatever network it
-is on, so the bridge needs a route from the device and a route to the platform;
-treat it as a public service, not a laptop convenience. Its own authentication is
-what stands between the internet and a process that holds the platform's shared
-credential, which is why both secrets are required with no default — there is
-deliberately no "run it without auth" path — and why an empty
-`BRIDGE_ALLOWED_DEVICES` answers nobody. What this does not do is fix the
-platform's shared-token model: `API_AUTH_TOKEN` is still one secret for every
-resource, and the bridge's job is to keep it off hardware, not to make it
-per-device.
-
-**What this does not protect against, stated plainly.** The Device-Id is a header
-the client sets, so the allowlist keeps out a device this bridge was not told
-about — it does not keep out someone who already knows the identifier of a device
-it was. Rotating `BRIDGE_DEVICE_SECRET` is the lever for a device believed
-compromised: it re-provisions every device at its next boot.
+`src/platform.ts` is the only place the runtime credential becomes a header, and
+`src/credentials.ts` is the only place a gadget's token is checked. A future call
+that builds its own `Authorization` header is the way this leaks.
 
 ## Dependencies
 
-Runtime: `ws` — the WebSocket server — and `opusscript` — the Opus codec,
-which both directions of the audio need (5.1, 6.1). Nothing else; the HTTP side is
-`node:http` and credentials are `node:crypto`.
-
-Development: `tsx` (runs the TypeScript directly), `typescript` (type-checking
-only — it never emits), `@types/node`, `@types/ws`.
+`ws` for the device socket. Node's own `crypto` for the token and the password-free
+HMAC; nothing else — no database driver, no Opus library (the framing is done here
+and the payloads are handed over as they arrive).
 
 ## Status
 
-What this repository is for is the change
-`adaptive-interview-gadget-xiaozhi-bridge` in the `team-plans` OpenSpec store;
-its `design.md` and `tasks.md` are the specification this code is written
-against, and its task numbers are used below. The gadget's own tools were built
-under a second change in the same store, `adaptive-interview-gadget-device-tools`,
-and the one row they own is numbered from that change rather than from this one.
-
-| | |
-| --- | --- |
-| Works | The OTA answer, the per-device credential, the connect and its refusal, the hello exchange, the session id, the platform credential held on this side of the boundary and written up for an operator, and — the things that use it — the persona catalog read from the platform at start and cached, the binding that maps each device onto one persona's prompt, topics and answer mode, and the resolution of that binding for a turn: from the cache, from a fresh read when the cache misses, and a refusal that names the device and the identifier when it still misses (3.3, 3.4). The turn itself (4.1): the browser's own request, carrying that persona's fields and the device's language, with the reply's events consumed as they arrive. The conversation around it (4.2, 4.3): each device's turns held on this side, sent back as the turn's history and bounded to the most recent. And the speech back to the device (5.1, 5.2, 5.4, 5.5): each sentence's audio unwrapped from its WAV, re-encoded as Opus at the rate the hello declared, framed, and bracketed with `tts start` and `tts stop` — without which the firmware discards every frame in silence — with what is being said announced ahead of its own frames — `tts sentence_start`, which is the only thing that moves the device's display — **once per thing said** rather than once per piece of it, so a reply's sentences are named as they are heard and a track is named for the whole of it instead of once per ten seconds of it, and a sentence carrying no audio, or a reply with nothing speakable in it at all, completing the turn in silence rather than failing it. **And "as they are heard" is the audio's clock rather than the platform's**: a name is sent in the same act as the first frame of the audio it names, so it leaves one pacing lead ahead of that audio — 240 ms, `PACE_LEAD_FRAMES` at the frame duration, and about one syllable in front of the sound rather than with it when it was listened to at the device on 2026-10-12 — and never ahead of a reply the platform produced faster than realtime — which is what a name sent where the sentence arrived would be, and what the display did until this was fixed. |
-| Speech from the device (6.1–6.7) | The device streams Opus; the bridge decodes it at the device's own 16000 Hz, decides for itself when the person has stopped speaking, and uploads the utterance rather than the window it was spoken into. The endpointer counts speech over a sliding window, closes a turn on silence after speech, holds it open across a pause inside a sentence, gives up on a window nobody spoke into, and refuses at start a configuration in which a turn could never close. The frames it judged are the frames it uploads — one structure, one verdict per frame, no second decode — trimmed back from the last voiced frame so 38.4 s of window carrying 1.32 s of speech does not go to the transcriber as 38.4 s (D11). The transcription comes back to the device as `stt` before the reply does. A wake word mid-reply cancels the turn — at its source, so the sentences the platform has still to send stop being produced, **and at the speaker**, so the frames the turn had reserved and not yet handed over are abandoned rather than delivered — 32.28 s of a 49.02 s reply, measured 2026-10-12, the platform having produced that reply faster than realtime — while what had already left belongs to the device, which stops it by leaving `Speaking` of its own accord. The second half is not a detail: a sentence's name travels with its own first frame, and `sentence_start` is the one `tts` message the firmware does *not* gate on the device being in `Speaking` (`main/application.cc:639`, where its neighbour `stop` is gated), so a display left running goes on naming sentences nobody hears — reported from the deployment 2026-10-12, and what `docs/device-protocol.md` had recorded as this case having no observation; watched after the fix the same night, the display stops where the interruption lands and names nothing further. The turn ends rather than failing — recorded, so the question the person was cut off asking survives into the next turn's history. And after a turn the microphone is distrusted for as long as this reply's own audio is still playing, plus a guard — which is accurate for a reply the platform produces no slower than realtime, and spent before it is armed when the platform is slower (D16). |
-| The gadget's own tools (device-tools 1–4) | The gadget runs an MCP server of its own and the bridge is its client (D1): the hello declares it, the bridge reads back the catalog the gadget reports, and what it calls is a short list — the speaker's volume, the screen's brightness and the screen's theme, which is the whole of what this board registers that a deployment has any business changing. A stated value is passed through; a relative change is computed from a status read taken *at that moment* — the same `self.get_device_status` that is read once at the handshake and appended to the turn's `systemPrompt`, so a persona can speak about the gadget it is in — and clamped to the range the tool declares, so a value past the end of the range leaves the setting at that end rather than unset. The step a relative change takes is configuration — `BRIDGE_COMMAND_STEP`, as `BRIDGE_HISTORY_TURNS` is for the conversation — rather than a constant in the code. **What it cannot do is as much of the feature as what it can.** There is no configuration, no camera on this board, and nothing a different board registers: the bridge calls only names the catalog actually reported, so a command naming anything else is abandoned and said so in the log, with the gadget left as it was. A spoken command is also not an interview turn. It is recognised by its whole utterance and nothing less, in the gadget's own language, and when it is recognised the turn is aborted at the transcript — nothing of the platform's answer is spoken, because the speaker's bracket never opens — and the exchange is kept out of the conversation, so the next interview turn is asked with the history it would have been asked with had the command not happened. The command is then answered twice, and neither answer is spoken: the speaker stays silent, and the display names the command — from the `stt` the bridge sends, which carries the person's own words, rather than from anything the tool call puts on the screen. **And a command may ask for music of the bridge's own**: a track read off the machine the bridge runs on, played through the gadget's speaker in one bracket, and named on the display once for the whole of it rather than once per piece. The name a request carries is matched onto the files **as it would be spoken** — folded, so that tone marks and punctuation are not what decides, **whether the words come back apart or put together**: a hyphen invites a transcriber to rejoin them, and it can rejoin only some of them, so `aoluahadong` is compared against `Ao-Lua-Ha-Dong-Ngo-Thuy-Mien.mp3` with the separators out and held to the words of the name, which is what keeps that from being a search for any fragment; read with the words a request is wrapped in taken off, so that `lên`, which ends `bật nhạc lên` and is also the last word of the volume command `to lên`, is not taken for a track's name; and taken as the longest run of the request's words that a file's name carries, so that naming the singer after the title still finds the track. A number in the request is held to the file that answers it, so that a request for one of several numbered siblings is never answered with another. Where the directory cannot settle it — two files answering equally well, or none — nothing is played, and the utterance stays a thing said to the platform, which reports it rather than the bridge dropping it in silence. And the model is offered **the names of the tracks the bridge holds** (`bridge.list_music`) wherever a music directory is configured, read at the call rather than held: a title said inside another language comes back as something no file is called, and a model shown the shelf can choose where no matcher can. A deployment with no music is offered none of it. **And a track is played at a level the deployment records** — `BRIDGE_MUSIC_GAIN_DB`, `-10` dB by default, which is a measurement rather than a preference: over three tracks of this deployment's own library and six synthesis draws, a track's RMS sits **10.4 dB above the voice this gadget speaks with**, and a track is *continuous* where a reply is not — a reply spends 21–34% of its time near its own peak and a track 63–76%. Music played at its own level is what leaves the person no opening to be heard over it. **Nor does preparing a track disturb the reply it follows**: the file is decoded off the event loop and handed over a piece at a time, because a whole track taken in one step measured 843 ms of decode and 1576 ms of encode, and the frames already playing are delivered by timers while the loop is held. |
-| Verified on a device (2026-10-06, 2026-10-07, 2026-10-12) | The board is attached and running this build. It is an N16R8 — 16 MB flash and 8 MB PSRAM, read from the silicon rather than from the boot log, which on this console cannot carry them (1.2, `docs/hardware.md`). It is pointed at this server rather than the vendor's, is admitted by the credential flow, and has taken turns here (1.4). The protocol document was confirmed against it: the connect message, the `listen` messages, both directions' declared rates and the framing version in use (1.5, `docs/device-protocol.md`). And it held four spoken turns in one session — wake word, transcription, reply, playback — which is where 7.1's figures come from. It has also run firmware rebuilt from a clean checkout of upstream, flashed from that tree and checked on the image rather than assumed — its OTA endpoint, its compiled UI language, and its ELF hash against the build's own `xiaozhi.elf` — and held turns on it (1.1, `docs/hardware.md`); what runs on it now is the working tree's own build, flashed 2026-10-12 and checked the same way, `ELF file SHA256: 46de1b526…` in the boot log against that tree's `build/xiaozhi.elf`. |
-| Does not work yet | The platform's `notice` and `error` events are surfaced to the device and to the log, but the recovery around them has been exercised against a stub platform rather than the live one (4.4). The vendor baseline was never taken, so a failure on the kit cannot yet be attributed between our work and the platform's (1.3 — declined, not missed). A wake word fired mid-reply — 6.5's cancel — is no longer a source reading but a measurement: on 2026-10-12 it landed mid-reply and again mid-track, and each time it cancelled the turn at its source and at the speaker. What the *display* does at that moment was the last half without an observation, and it has one now: watched on the deployment that night, with five sentences of a seven-sentence reply already produced and none of them yet named, the screen stopped where the interruption landed and named nothing further. And barge-in on AEC hardware is unverified: this kit has no echo canceller, and 7.3 waits on a BOX-3. The board is attached again (2026-10-12) and its tool catalog is read off it rather than off a socket that answers as a gadget does. What is left of the device-tools change is the same list minus its catalog: a *command* spoken mid-session, and the words without the command (4.3 and 4.4, which are not this change's tasks of those numbers). **And a wake word does interrupt a track**, measured 2026-10-12: said into a track playing at the deployment's recorded level, the board's own detector reports `Wake word detected: … (state: 6)` — the firmware enables detection while it is `Speaking` (`main/application.cc:1052`), and this board is AFE with the `wn9_alexa` model, so that call is not a no-op — the `abort` reaches the bridge carrying `reason: wake_word_detected`, and the music stops (`the wake word stopped the music`, `src/server/ws.ts`): 32.41 s into the track by the board's own clock and 32.70 s by the bridge's. No echo canceller is needed for it, and this board has none: no playback reference channel, `CONFIG_USE_DEVICE_AEC` not selectable for it, and every `listen start` saying `mode=auto` as the proof. |
+Every turn path is implemented and covered: OTA and activation, the upgrade and
+the handshake, the endpointer, speech in and out, commands, music, the paired
+exchange, the conversation's record, and the console resolution that makes a
+device exist at all. What is not here is the console itself — see its own README.
 
 ## Layout
 
-```
-docs/
-  device-protocol.md  where the gadget departs from its own protocol document: the deltas only
-src/
-  index.ts            starts both servers, prints the banner
-  config.ts           everything read from the environment, read once
-  credentials.ts      who may connect, and with what token
-  platform.ts         the platform's credential, turned into a request in one place
-  personas.ts         the persona catalog: fetched, validated, cached, resolved per device, and mapped onto a turn's three fields
-  turn.ts             the turn: the platform's voice-agent request, and the reply's stream
-  conversation.ts     a device's conversation: per device, sent as history, bounded, and the one turn kept out of it
-  listening.ts        the device's microphone: the endpointer that closes a turn, and the utterance it uploads
-  speech.ts           the device's voice: what is being said announced for the display once per thing said, then as Opus frames, inside the tts bracket
-  commands.ts         the commands the bridge answers itself: what a command is, whole-utterance only, in either language
-  music.ts            the bridge's own music: the file a request names, matched out of its own directory, and the track played through the device's speaker
-  gadget.ts           the gadget's own tools: the catalog it reports, the condition read from it, and the settings changed on it
-  log.ts              stamped log lines, matching the rig's format
-  net/local-ip.ts     picking a LAN address the device can route to
-  protocol/
-    framing.ts        the 4-byte (v3) and 16-byte (v2) headers around Opus
-    mcp.ts            the JSON-RPC the gadget speaks, as its client: the envelope, the catalog, and one tool call
-    messages.ts       the text messages, and the reply to a hello
-    opus.ts           the codec, both ways: a sentence re-encoded into the device's frames, and the device's frames decoded and joined into one WAV
-    wav.ts            the WAV container, both ways: the platform's sentence audio unwrapped, and the utterance wrapped for upload
-  server/
-    ota.ts            the OTA endpoint — issues the token, or refuses
-    ws.ts             the device socket: the refusal, the session, the speech to it, the listening that ends a turn, and the commands answered without one
-test/
-  config.test.ts      the fail-closed rules: empty allowlist, two credentials with no default, unbound devices
-  credentials.test.ts tokens, the allowlist, and every way a connection is refused
-  platform.test.ts    the platform header's shape, and that the two credentials never cross
-  personas.test.ts    the strict read, the cached copy, the credentialed request, the mapping onto a turn, and the resolution that re-reads on a miss
-  turn.test.ts        the request the browser would have sent, and a reply's events consumed as they arrive
-  conversation.test.ts a device's conversation: what a turn carries in, and what it leaves behind
-  speech.test.ts      the bracket around a reply, what it carries, and what the display is told — once per thing said
-  listening.test.ts   the endpointer over frames, which part of the window to upload, and the utterance that closes a turn
-  spoken-turn.test.ts the whole path, both halves at once: a real socket, real Opus, a real endpointer and a stub platform
-  commands.test.ts    the utterances that are commands, and the ones that only look like them
-  music.test.ts       a track decoded off the disk, the tools the bridge offers for its own music, and the bracket a track is played inside
-  music-choice.test.ts the name a request carries, matched onto the files a directory holds
-  gadget.test.ts      the gadget's condition, the catalog, and what changing one of its settings does
-  framing.test.ts     round trips, and short packets
-  mcp.test.ts         the envelope, the handshake, and what a tool's answer is read as
-  opus.test.ts        a sentence's frames, checked against a real decoder
-  wav.test.ts         the container: what the format chunk says, and where the samples start
-  ota.test.ts         the answer's fields, and who gets one
-  handshake.test.ts   the refusal and the hello exchange, over a real socket
-```
+| Path | What lives there |
+| --- | --- |
+| `src/index.ts` | The composition root: config, console client, both servers. |
+| `src/config.ts` | Everything read from the environment, and what is refused. |
+| `src/registry.ts` | The console client: resolution, activation, the turn record. |
+| `src/credentials.ts` | Device identifiers and the token derivation. |
+| `src/platform.ts` | The one place a runtime credential becomes a header. |
+| `src/conversation.ts` | A gadget's conversation, and taking one turn. |
+| `src/turn.ts` | The runtime's turn request and its event stream. |
+| `src/speech.ts` | The downlink: brackets, sentences, Opus frames. |
+| `src/listening.ts` | The uplink: the window and the endpointer. |
+| `src/commands.ts` | The short commands the bridge answers itself. |
+| `src/music.ts` | The bridge's own music. |
+| `src/server/ota.ts` | OTA, activation, and the token. |
+| `src/server/ws.ts` | The device's socket and its session. |
+| `src/protocol/` | Framing, Opus, MCP, the message shapes. |
+| `docs/` | The protocol deltas, and the hardware. |
 
 ## License
 
-The application code in this repository is [MIT licensed](LICENSE).
-
-**The scaffolding under `.claude/` and `.github/` is not ours.** Those 49 files were
-generated by the OpenSpec CLI and are redistributed under its own MIT license, which
-is reproduced in full in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) along with
-what this repository references rather than carries — the device firmware, the
-toolchain that built it, and the runtime dependencies.
+MIT — see `LICENSE`.

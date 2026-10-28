@@ -251,7 +251,15 @@ export function createSpeaker(
       // Before the first frame, never after: the device discards frames that
       // arrive outside `speaking`, and the discard is invisible.
       if (!speaking) {
-        if (!sendJson({ type: "tts", state: "start" })) return;
+        if (!sendJson({ type: "tts", state: "start" })) {
+          // The socket is gone. This is the first send of the reply to find it, and every
+          // later sentence would find it again — a dead socket never reaches a frame, so
+          // the guard set in the delivery below would never fire. Set here as well: the
+          // rest of the reply is neither prepared nor announced, and the close is reported
+          // once rather than once per sentence.
+          gone = true;
+          return;
+        }
         speaking = true;
         bracketOpen = true;
         // The moment the answer becomes true, and the only place it can: the device is out of

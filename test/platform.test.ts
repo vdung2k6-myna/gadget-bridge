@@ -1,71 +1,48 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { ENDPOINTER_DEFAULTS, MUSIC_GAIN_DB_DEFAULT, type BridgeConfig } from "../src/config.js";
 import { deriveToken } from "../src/credentials.js";
-import { platformAuthHeaders } from "../src/platform.js";
+import { runtimeAuthHeaders } from "../src/platform.js";
 
 /**
- * The platform's credential crosses the boundary in exactly one shape: a Bearer
- * header on a request this bridge makes to the platform. That shape is pinned
- * here because the platform's validator compares the presented token with `===`
- * — so anything done here for convenience (trimming, re-casing, a prefix of its
- * own) is not a tidier credential but one that stops authenticating.
+ * The runtime's credential crosses the boundary in exactly one shape: a Bearer
+ * header on a request this bridge makes on a gadget's behalf. That shape is
+ * pinned here because a runtime compares the presented token byte for byte — so
+ * anything done here for convenience (trimming, re-casing, a prefix of its own)
+ * is not a tidier credential but one that stops authenticating.
  *
  * The other half is which credential is in it. The bridge holds two secrets that
- * must never be confused: the device secret, which a device's token is derived
- * from, and the platform's, which a device must never see. A header carrying the
- * wrong one is the leak this whole task exists to prevent.
+ * must never be confused: a gadget's own, which its socket token is derived
+ * from, and the runtime's, which a gadget must never see.
  */
 const BOARD = "b8:1f:3f:4a:9b:01";
-const SECRET = "s".repeat(43);
-const PLATFORM = "platform-token-abcdefgh";
+const DEVICE_SECRET = "s".repeat(43);
+const RUNTIME = "runtime-token-abcdefgh";
+const BASE = "http://127.0.0.1:4000";
 
-function configFor(apiAuthToken: string): BridgeConfig {
-  return {
-    otaPort: 0,
-    wsPort: 0,
-    publicHost: "127.0.0.1",
-    deviceSecret: SECRET,
-    allowedDevices: ["b81f3f4a9b01"],
-    devicePersonas: new Map([["b81f3f4a9b01", "language-partner"]]),
-    platformUrl: "http://127.0.0.1:4000",
-    apiAuthToken,
-    framing: 3,
-    serverRate: 24000,
-    frameMs: 60,
-    ...ENDPOINTER_DEFAULTS,
-    sessionIdleMs: 60000,
-    musicDir: "",
-    musicGainDb: MUSIC_GAIN_DB_DEFAULT,
-    historyTurns: 20,
-    commandStep: 10,
-    deviceLanguages: new Map([["b81f3f4a9b01", "english"]]),
-    deviceEngines: new Map([["b81f3f4a9b01", "supertonic"]]),
-    devicePartners: new Map(),
-    handoverMs: 400,
-  };
-}
-
-describe("the platform credential as a request", () => {
+describe("the runtime credential as a request", () => {
   it("is presented as a Bearer header, verbatim", () => {
-    assert.deepEqual(platformAuthHeaders(configFor(PLATFORM)), { Authorization: `Bearer ${PLATFORM}` });
+    assert.deepEqual(runtimeAuthHeaders({ baseUrl: BASE, token: RUNTIME }), {
+      Authorization: `Bearer ${RUNTIME}`,
+    });
   });
 
-  it("does not reshape a token the platform issued", () => {
-    // Whitespace on the ends is the platform's business, not this service's:
-    // it carries the token it was given.
-    const asIssued = ` ${PLATFORM} `;
-    assert.equal(platformAuthHeaders(configFor(asIssued)).Authorization, `Bearer ${asIssued}`);
-  });
-
-  it("carries the platform's credential and never a device's", () => {
-    const config = configFor(PLATFORM);
-    const header = platformAuthHeaders(config).Authorization;
+  it("does not reshape a token the console returned", () => {
+    // Whitespace on the ends is the runtime's business, not this service's: it
+    // carries the token it was given.
+    const asIssued = ` ${RUNTIME} `;
     assert.equal(
-      header.includes(deriveToken(config.deviceSecret, BOARD)),
-      false,
-      "a request to the platform must not carry a device token, and vice versa"
+      runtimeAuthHeaders({ baseUrl: BASE, token: asIssued }).Authorization,
+      `Bearer ${asIssued}`
     );
-    assert.equal(header.includes(config.deviceSecret), false);
+  });
+
+  it("carries the runtime's credential and never a gadget's", () => {
+    const header = runtimeAuthHeaders({ baseUrl: BASE, token: RUNTIME }).Authorization;
+    assert.equal(
+      header.includes(deriveToken(DEVICE_SECRET, BOARD)),
+      false,
+      "a request to a runtime must not carry a gadget's token, and vice versa"
+    );
+    assert.equal(header.includes(DEVICE_SECRET), false);
   });
 });

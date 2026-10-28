@@ -136,11 +136,17 @@ export interface Gadget {
  * that never answers costs this session nothing" is a claim about a deadline, and
  * checking it wants a deadline that arrives now.
  */
+export interface GadgetOptions extends McpOptions {
+  /** Called once the tool channel is up, with the catalogue the gadget declared — an
+   *  empty one included, because "offers nothing" and "never heard from" differ. */
+  onCatalogue?(tools: readonly McpTool[]): void;
+}
+
 export function createGadget(
   socket: McpSocket,
   config: BridgeConfig,
   sessionId: string,
-  options: McpOptions = {}
+  options: GadgetOptions = {}
 ): Gadget {
   const mcp = createMcpClient(socket, sessionId, options);
   let condition: string | null = null;
@@ -171,11 +177,21 @@ export function createGadget(
 
   return {
     async start(): Promise<void> {
-      await mcp.start();
+      // A handshake that fails is reported by the channel itself; what it leaves is an
+      // empty catalogue, which is still a thing to report — the gadget was asked and
+      // offered nothing.
+      try {
+        await mcp.start();
+      } catch (error) {
+        warn(`the tool channel did not come up: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      const catalogue = mcp.tools();
+      options.onCatalogue?.(catalogue);
+
       // Nothing callable is nothing to read: a gadget whose tool channel did not come
       // up has already been reported once by the handshake, and a second line here
       // would only restate it (D4).
-      if (mcp.tools().length === 0) return;
+      if (catalogue.length === 0) return;
 
       const status = await readNow();
       if (status === null) return;

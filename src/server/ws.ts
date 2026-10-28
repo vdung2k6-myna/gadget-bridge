@@ -1,7 +1,6 @@
 import type { IncomingMessage } from "node:http";
 import { WebSocketServer, type RawData, type WebSocket } from "ws";
 import type { BridgeConfig } from "../config.js";
-import { boundLanguage, describeBinding, partnerOf } from "../config.js";
 import { basename } from "node:path";
 import { describeCommand, matchCommand, type BridgeCommand, type GadgetCommand } from "../commands.js";
 import { BRIDGE_TOOL_PREFIX, chooseTrack, decodeTrack, listTrackNames, musicCommand, musicTools, playTrack } from "../music.js";
@@ -11,10 +10,11 @@ import { authorizeDevice, describeDenial } from "../credentials.js";
 import { createGadget, type CommandOutcome } from "../gadget.js";
 import { createListening } from "../listening.js";
 import { err, info, log, runWithDevice, section, warn } from "../log.js";
-import type { PersonaCatalog } from "../personas.js";
+import type { Gadget, Registry } from "../registry.js";
 import { advertisesTools } from "../protocol/mcp.js";
 import { isAbort, isHello, isListen, isMcp, parseClientMessage, serverHello } from "../protocol/messages.js";
 import { createSpeaker } from "../speech.js";
+import { DEVICE_GONE } from "../turn.js";
 import type { ToolCallOutcome, ToolCallRequest, TurnSentence, TurnTool } from "../turn.js";
 
 /**
@@ -64,6 +64,8 @@ const IDLE_CLOSE_GRACE_MS = 1_000;
 interface DeviceRequest extends IncomingMessage {
   /** Set by the upgrade check, read by the session. The authenticated identity. */
   bridgeDeviceId?: string;
+  /** The resolution that identity was authorized with, carried to the session. */
+  bridgeGadget?: Gadget;
 }
 
 /**
@@ -94,7 +96,7 @@ interface PairedSession {
  * is kept per device precisely so that a reconnecting device is not a stranger.
  */
 export interface WsServices {
-  catalog: PersonaCatalog;
+  registry: Registry;
   conversations: Conversations;
 }
 
@@ -103,8 +105,31 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
     port: config.wsPort,
     verifyClient: (info, done) => {
       const req = info.req as DeviceRequest;
-      const verdict = authorizeDevice(config, {
-        deviceId: header(req, "device-id"),
+      void (async () => {
+      const rawDeviceId = header(req, "device-id");
+      if (rawDeviceId === undefined || rawDeviceId.trim() === "") {
+        warn(`refused ${req.socket.remoteAddress}: no Device-Id header`);
+        done(false, 401, "Unauthorized");
+        return;
+      }
+
+      // The gadget's own secret decides the token, so the console is asked before
+      // the upgrade is answered. Unreachable is a refusal, not a remembered answer:
+      // a gadget the console has not resolved is not served.
+      let resolved: Gadget;
+      try {
+        resolved = await services.registry.resolve(rawDeviceId);
+      } catch (error) {
+        warn(
+          `refused ${req.socket.remoteAddress}: the console could not resolve ${rawDeviceId} — ` +
+            `${error instanceof Error ? error.message : String(error)}`
+        );
+        done(false, 503, "Registry unavailable");
+        return;
+      }
+
+      const verdict = authorizeDevice(resolved.secret, {
+        deviceId: rawDeviceId,
         authorization: header(req, "authorization"),
       });
 
@@ -121,7 +146,9 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
       }
 
       req.bridgeDeviceId = verdict.deviceId;
+      req.bridgeGadget = resolved;
       done(true);
+      })();
     },
   });
 
@@ -143,8 +170,17 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
 
   wss.on("connection", (ws: WebSocket, req: DeviceRequest) => {
     const deviceId = req.bridgeDeviceId ?? "unknown";
+    // The resolution the upgrade was authorized with. It cannot be absent here,
+    // because the upgrade does not reach this listener without one.
+    const resolvedGadget = req.bridgeGadget;
+    if (resolvedGadget === undefined) { ws.close(1011, "no resolution"); return; }
+    const resolved: Gadget = resolvedGadget;
+    // What was said to this gadget before the bridge restarted, read back from the
+    // record the console kept.
+    services.conversations.seed(resolved.deviceId, resolved.turns);
+    const binding = resolved.agent === null ? "no agent bound" : `${resolved.agent.language}/${resolved.agent.engine}`;
     /** The gadget this one converses with, or nothing where the deployment pairs none (D8). */
-    const partnerId = partnerOf(config, deviceId);
+    const partnerId = resolved.partner ?? undefined;
     /**
      * A listener that writes on this session's behalf, under the scope that names it.
      *
@@ -188,7 +224,11 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
     // is a property of the firmware this session is talking to, so it belongs to this
     // connection and not to the process — and nothing here is awaited by a turn (D3,
     // D4).
-    const gadget = createGadget(ws, config, session.id);
+    const gadget = createGadget(ws, config, session.id, {
+      // What the gadget declared, for its own page. Fire-and-forget: a catalogue is
+      // bookkeeping and never something a session waits on.
+      onCatalogue: (tools) => services.registry.reportTools(deviceId, tools),
+    });
     // One turn at a time per device. A `listen start` arriving while a reply is
     // still playing is either a person talking over it or the echo of a wake word
     // (6.5); neither is a second turn, and starting one would talk over a reply
@@ -200,6 +240,11 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
     // and stops `onSentence` — one mechanism covering the turn being produced, the
     // bracket mid-reply, and the window where no bracket was ever opened.
     let turn: AbortController | null = null;
+    // Whether this session's socket has closed. Read by the turn's own unwinding, which
+    // routinely finishes after the close: a session with no device has nobody to speak
+    // to and nothing to keep alive, so it must not re-arm a window or reopen one. Set
+    // before the turn is aborted, so an unwind that starts inside the abort sees it.
+    let closed = false;
     // Whether the previous frame was dropped as the device's own echo, so the
     // endpointer's clock can be restarted when that window ends (6.6).
     let draining = false;
@@ -497,7 +542,7 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
       log(
         `turn from speech: ${upload.seconds.toFixed(2)}s of the person's own voice` +
           `${upload.failed ? `, ${upload.failed} frame(s) undecodable` : ""}` +
-          ` (${describeBinding(config, deviceId)})`
+          ` (${binding})`
       );
 
       // What the turn is asked with, so that "the conversation is the one it would
@@ -582,9 +627,9 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
 
     const result = await takeTurn(
           config,
-          services.catalog,
+          resolved,
           services.conversations,
-          deviceId,
+          services.registry,
           {
             audio: { filename: "turn.wav", contentType: "audio/wav", data: upload.wav },
             ...(condition !== null ? { gadgetCondition: condition } : {}),
@@ -617,7 +662,7 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
               // A binding a started bridge cannot be missing (`config.ts`); a session
               // without one judges nothing here, and the turn it takes is reported as not
               // served by `takeTurn` rather than being matched against another language.
-              const language = boundLanguage(config, deviceId);
+              const language = resolved.agent?.language;
               if (language === undefined) return;
               const command = matchCommand(language, said, { music: config.musicDir !== "" });
               if (command === null) return;
@@ -717,6 +762,17 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
           // No persona answered, which is 3.4's miss rather than a failure of the turn.
           // The device has already been left in a state to take the next one.
           err(`turn not served: ${result.message}`);
+        } else if (closed) {
+          // The reply was answering a socket that had gone, so nothing it produced could
+          // be heard. Said as a cancellation, and not as a turn that ended settled: the
+          // platform's half is not the whole of what happened, and the one figure that
+          // used to sit here — audio "sent" over the session — is cumulative over a socket
+          // that is gone, which reads as delivery it never had.
+          log(
+            `turn cancelled — the device left ` +
+              `${speaker.spokeThisTurn() ? "after its speech had begun" : "before any of it was spoken"}; ` +
+              `${result.outcome.replyText.length} char(s) of reply produced`
+          );
         } else {
           log(
             `turn ended ${result.outcome.settled ? "settled" : "unsettled"}, ` +
@@ -761,8 +817,10 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
         turning = false;
         // The reply has just stopped being heard, which is the likeliest moment for the
         // person to speak again. The window starts again from here rather than from when
-        // the utterance closed, which may have been a long reply ago.
-        sawPerson();
+        // the utterance closed, which may have been a long reply ago. A session whose
+        // socket has closed has no person left to be behind the window: re-arming it here
+        // is what used to keep a gone session resident for another whole idle window.
+        if (!closed) sawPerson();
         // A turn the bridge said nothing for leaves the device exactly where it was: no
         // bracket was opened, so it never left `Listening`, and being already in the
         // state it would come back to, it never sends the `listen start` that opens the
@@ -776,7 +834,7 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
         // speak is followed by the device's own `listen start`, and opening a second
         // window under that one would judge its opening audio against decisions already
         // taken in it (6.7).
-        if (!session.listening && !speaker.spokeThisTurn()) {
+        if (!closed && !session.listening && !speaker.spokeThisTurn()) {
           session.listening = true;
           listening.open();
           log(
@@ -876,9 +934,9 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
       try {
         const result = await takeTurn(
           config,
-          services.catalog,
+          resolved,
           services.conversations,
-          deviceId,
+          services.registry,
           { text },
           {
             onSentence: (sentence) => {
@@ -1051,6 +1109,11 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
         if (advertisesTools(msg.features)) {
           log(`device advertises MCP — asking what it can be asked to do (1.1)`);
           void gadget.start();
+        } else {
+          // A gadget with no tool channel has been heard from, and what it declared is
+          // nothing. Reported so its page can say that rather than "not heard from" for
+          // as long as it lives.
+          services.registry.reportTools(deviceId, []);
         }
         return;
       }
@@ -1162,6 +1225,16 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
           `session ${session.id} device ${deviceId} code ${code}; ${session.frames} frame(s), ` +
             `${session.bytes} B, ${session.drained} dropped as our own audio`
         );
+        // The turn belonged to this socket: the platform request, the speech it had not
+        // delivered, and anything prepared for the exchange all end with it. The abort
+        // comes before the teardown below so the turn's own unwinding — which runs after
+        // this handler — reads the session as closed and leaves nothing running.
+        closed = true;
+        turn?.abort(DEVICE_GONE);
+        dropPrepared();
+        // The partner's prepared reply answers an exchange this gadget is no longer part
+        // of, and it would be spoken to a room the turn that prompted it never reached.
+        if (partnerId !== undefined) paired.get(partnerId)?.dropTurn();
         // The window goes with the socket, WASM memory and all (6.7).
         listening.close();
         // And so does the handle the other side of the pair was using: a prepared turn whose session

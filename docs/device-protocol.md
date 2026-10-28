@@ -360,3 +360,24 @@ message rather than a side effect of the change it made.
 **Still source-read only.** The sessions of 2026-10-06 and 2026-10-07 both predate the
 MCP client — no `mcp` message was sent in either direction — so everything above rests
 on the source and none of it was exercised on the wire.
+
+## 8. A socket that closes is the end of the turn, and it arrives with no close frame
+
+Measured twice on 2026-10-28: the gadget's socket ended with code 1006 — no close
+frame, which `ws` synthesises locally when the peer vanishes, so it is a reset, a link
+loss, or a device that stopped rather than a close the firmware asked for. One of the
+two arrived in the same millisecond the gadget answered a `self.radio.play` call, with
+`{"success": true}` already on the wire: the gadget reported the station playing and
+then disappeared.
+
+**The bridge:** ends the session and the turn with that socket. The platform request is
+aborted, nothing further is produced or announced, the reply prepared for a paired
+exchange is dropped, and the turn is reported as cancelled rather than settled. A
+closed session leaves nothing running either: no listening window is reopened and no
+idle deadline is re-armed for a socket that is gone. The record keeps the person's
+question without a reply nobody heard, because the runtime goes on producing after the
+device has left and what it produced reached nobody.
+
+Before this, the turn ran to completion, its audio died at the first `tts start`, and
+the log called it a turn that ended normally — with the socket's cumulative audio
+counter beside it, which is not a record of delivery.

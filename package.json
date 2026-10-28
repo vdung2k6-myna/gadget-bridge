@@ -1,5 +1,5 @@
 {
-  "name": "adaptive-interview-bridge",
+  "name": "gadget-bridge",
   "version": "0.1.0",
   "license": "MIT",
   "private": true,
@@ -12,7 +12,8 @@
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "test": "tsx --test test/*.test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "load-test": "tsx scripts/load-test.ts"
   },
   "dependencies": {
     "mpg123-decoder": "^1.0.3",

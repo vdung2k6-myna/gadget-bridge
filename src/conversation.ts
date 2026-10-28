@@ -1,43 +1,28 @@
 import type { BridgeConfig } from "./config.js";
-import { boundEngine, boundLanguage } from "./config.js";
 import { matchCommand } from "./commands.js";
-import type { PersonaCatalog, PersonaMissReason } from "./personas.js";
-import { describePersonaMiss, resolveBoundPersona, turnFieldsFor } from "./personas.js";
-import type { TurnAudio, TurnLanguage, TurnMessage, TurnOutcome, TurnSink, TurnTool } from "./turn.js";
-import { runTurn } from "./turn.js";
+import type { Gadget, GadgetTurn, Registry } from "./registry.js";
+import type { TurnAudio, TurnMessage, TurnOutcome, TurnSink, TurnTool } from "./turn.js";
+import { DEVICE_GONE, runTurn } from "./turn.js";
 
 /**
  * A gadget's conversation, carried across its turns.
  *
- * The platform's voice-agent endpoint keeps no conversation (D2). It is
- * stateless and self-describing: the persona arrives as `systemPrompt`, and
- * everything said earlier arrives as `history`, every turn, because there is
- * nothing on the far side holding it. So this is where a conversation lives, and
- * a gadget that is not sent its own history is a gadget with no memory — the
- * person repeats themselves and the persona meets them as a stranger.
+ * A runtime keeps no conversation of its own. It is stateless and
+ * self-describing: the agent's prompt arrives as `systemPrompt`, and everything
+ * said earlier arrives as `history`, every turn. So this is where a conversation
+ * lives — and since the console records every served turn, it is also where a
+ * conversation is restored from when a bridge restarts: a session seeds its
+ * history from the turns the resolution returned, and appends to memory and to
+ * the console as it goes.
  *
  * The conversation is kept per device rather than per socket, because that is
  * what "this gadget's conversation" means: a device that drops its connection and
- * comes back is the same gadget, and starting it over would be a thing the person
- * experiences as the gadget forgetting. Nothing here is written to disk, so a
- * restart is a fresh conversation — which is the honest reading of a service that
- * holds no database.
- *
- * A turn is recorded from both sides. The person's side comes from the stream's
- * `user` event, which is the platform's transcription of what they said and the
- * only place it exists; the gadget's side is the reply text, which the bridge has
- * anyway because it is about to speak it. Neither is guessed.
- *
- * One turn is not a turn of the conversation: a command the bridge recognised and
- * answered by changing one of the gadget's own settings (D8). It is asked of the
- * platform — the transcript is the only place a command is knowable at all — and
- * then dropped, and what must not survive it is the transcript. `takeTurn` is where
- * it is left out, and the reason is at the check itself.
+ * comes back is the same gadget.
  */
 
 /** One completed exchange, as the conversation keeps it. */
 export interface TurnExchange {
-  /** What the person said, as the platform transcribed it. May be empty. */
+  /** What the person said, as the runtime transcribed it. May be empty. */
   user: string;
   /** What the gadget answered. May be empty, if the turn produced no reply. */
   agent: string;
@@ -46,27 +31,17 @@ export interface TurnExchange {
 export interface Conversations {
   /** The earlier turns, oldest first, ready to send as a turn's `history`. */
   history(deviceId: string): TurnMessage[];
+  /** Load what the console recorded, when a session begins. */
+  seed(deviceId: string, turns: readonly GadgetTurn[]): void;
   /** Take down a turn that was served. */
   record(deviceId: string, exchange: TurnExchange): void;
 }
 
 /**
  * Hold every device's conversation, bounded to the most recent `historyTurns`
- * turns (4.3).
- *
- * Bounded because the endpoint's own limit is invisible from here: a request
- * carrying an unbounded history grows with the session until it is refused or the
- * model's window is exceeded, and the failure lands on a turn rather than on a
- * startup. The bound drops the **oldest** turns — what the spec asks for — rather
- * than the platform's own trick of keeping the first exchange as well, because a
- * gadget conversation has no opening turn whose loss would be felt the way an
- * interview's introduction is: a greeting answered twenty turns ago is the least
- * useful thing in the history, not the most.
- *
- * A turn is dropped whole. A history beginning with the gadget's answer to a
- * question that is no longer in it is worse than a shorter one, so the pairing is
- * kept by construction: turns are stored as exchanges and flattened to messages
- * only on the way out.
+ * turns. The bound drops the oldest turns, and a turn is dropped whole: a
+ * history beginning with the gadget's answer to a question that is no longer in
+ * it is worse than a shorter one.
  */
 export function createConversations(config: BridgeConfig): Conversations {
   const byDevice = new Map<string, TurnExchange[]>();
@@ -74,6 +49,12 @@ export function createConversations(config: BridgeConfig): Conversations {
   return {
     history(deviceId: string): TurnMessage[] {
       return flatten(byDevice.get(deviceId) ?? []);
+    },
+
+    seed(deviceId: string, turns: readonly GadgetTurn[]): void {
+      const kept = turns.filter((turn) => turn.user !== "" || turn.agent !== "").map((turn) => ({ ...turn }));
+      while (kept.length > config.historyTurns) kept.shift();
+      byDevice.set(deviceId, kept);
     },
 
     record(deviceId: string, exchange: TurnExchange): void {
@@ -95,137 +76,87 @@ export function createConversations(config: BridgeConfig): Conversations {
 function flatten(exchanges: readonly TurnExchange[]): TurnMessage[] {
   const messages: TurnMessage[] = [];
   for (const exchange of exchanges) {
-    // A side that is empty is left out rather than sent blank. The platform's own
-    // parser accepts an empty content, so a blank message would be carried into the
-    // prompt as a turn nobody took.
+    // A side that is empty is left out rather than sent blank. The runtime's own
+    // parser accepts an empty content, so a blank message would be carried into
+    // the prompt as a turn nobody took.
     if (exchange.user !== "") messages.push({ role: "user", content: exchange.user });
     if (exchange.agent !== "") messages.push({ role: "agent", content: exchange.agent });
   }
   return messages;
 }
 
-/** What a turn needs from the device: what the person said or spoke. The language it
- *  is heard in and the engine it is spoken through are the device's own bindings and
- *  are resolved from `config` by `takeTurn`, so a caller cannot pass a different
- *  pair — which is what makes the two command matches and the turn's own declaration
- *  the same answer by construction. */
+/** What a turn needs from the device: what the person said or spoke. The
+ *  language and engine are the gadget's own, read from the agent the console
+ *  returned, so a caller cannot pass a different pair. */
 export interface DeviceTurnInput {
   audio?: TurnAudio;
   text?: string;
-  /**
-   * The gadget's own account of itself, when it gave one (2.1). Appended to the
-   * persona's prompt for this turn only, never stored: it is a fact about a device
-   * that can change between turns, so a copy kept here would be a second, staler
-   * answer to a question `gadget.ts` already answers.
-   *
-   * Absent — not empty — is the whole of how "this gadget has no condition to report"
-   * is said, so that a gadget without a tool channel is asked for exactly the turn it
-   * would have been asked for had none of this existed (requirement 5).
-   */
+  /** The gadget's own account of itself, appended to the prompt for this turn only. */
   gadgetCondition?: string;
-  /**
-   * What this turn may be asked to do: what the gadget says it can be asked to do, carried from
-   * the session's own report, and beside it the tools the bridge answers for itself — the
-   * catalogue the platform's model decides from (D3). Read per turn rather than stored here, like
-   * the condition above and for the same reason: it is the session's, and a copy would be a second
-   * answer that can go stale.
-   *
-   * Absent — not empty — when there is neither, so such a turn is asked for exactly as it would
-   * have been asked for had none of this existed.
-   */
+  /** What this turn may be asked to do: the gadget's catalogue and the bridge's own tools. */
   tools?: readonly TurnTool[];
 }
 
 export type DeviceTurnResult =
   | { served: true; userText: string; outcome: TurnOutcome }
-  /**
-   * No turn was sent. The gadget is bound to an identifier the catalog does not
-   * report, and the requirement is that it is answered as no one rather than as
-   * somebody else (D5, 3.4). `message` is the line to hand an operator; `detail`
-   * says which of the three misses it was.
-   */
-  | { served: false; miss: PersonaMissReason | "not-bound"; detail: string; message: string };
+  | {
+      served: false;
+      miss: "no-agent" | "not-owned";
+      detail: string;
+      message: string;
+    };
 
 /**
- * Take one turn for a device: resolve who answers it, carry the conversation in,
- * send it, and put the turn back into the conversation.
- *
- * This is the whole of what "a turn" means for this service, and it is the only
- * place the two halves of §4 meet: the persona's fields from §3 and the person's
- * own voice from §6 arrive as arguments, and what comes back is recorded for the
- * next turn. A caller that used `runTurn` directly would be skipping the
- * conversation, which is a bug that stays invisible for exactly one turn.
+ * Take one turn for a device: carry the conversation in, send it, and put the
+ * turn back into the conversation and into the console.
  */
 export async function takeTurn(
   config: BridgeConfig,
-  catalog: PersonaCatalog,
+  gadget: Gadget,
   conversations: Conversations,
-  deviceId: string,
+  registry: Registry,
   input: DeviceTurnInput,
   sink: TurnSink,
   signal?: AbortSignal
 ): Promise<DeviceTurnResult> {
-  // Resolved before anything is sent, and resolved the same way on every turn:
-  // whether a persona is missing can change while the bridge runs (3.3), so this
-  // is a per-turn answer and not a decision taken at connect.
-  const resolution = await resolveBoundPersona(catalog, config, deviceId);
-  if (!resolution.ok) {
+  if (!gadget.owned) {
     return {
       served: false,
-      miss: resolution.reason,
-      detail: resolution.detail,
-      message: describePersonaMiss(deviceId, resolution),
+      miss: "not-owned",
+      detail: `${gadget.deviceId} is not claimed`,
+      message: `${gadget.deviceId} belongs to no account, so no turn can be asked as it`,
     };
   }
 
-  // What this gadget is heard and spoken as, resolved beside the persona and for the
-  // same reason: it is the gadget's rather than the deployment's, so it is read where
-  // the gadget is known — and read once, because the turn's declaration and the two
-  // command matches have to be the same answer.
-  //
-  // A started bridge binds every gadget it allows (`config.ts`), so neither can be
-  // missing here. It is still answered rather than defaulted, because the
-  // alternative is a turn spoken in a language nobody chose.
-  const language = boundLanguage(config, deviceId);
-  const engine = boundEngine(config, deviceId);
-  if (language === undefined || engine === undefined) {
-    const missing = [language === undefined ? "a language" : "", engine === undefined ? "an engine" : ""]
-      .filter((part) => part !== "")
-      .join(" and ");
+  const agent = gadget.agent;
+  if (agent === null) {
     return {
       served: false,
-      miss: "not-bound",
-      detail: `${deviceId} is bound to no ${missing}`,
-      message:
-        `${deviceId} is bound to no ${missing}, so no turn can be asked as it — every gadget the ` +
-        `allowlist names is bound in BRIDGE_DEVICE_LANGUAGES and BRIDGE_DEVICE_ENGINES before the ` +
-        `bridge starts`,
+      miss: "no-agent",
+      detail: `${gadget.deviceId} has no agent`,
+      message: `${gadget.deviceId} has no agent bound, so it has nothing to say — bind one in the console`,
     };
   }
 
+  const startedAt = new Date();
   // The turn's own transcript, captured from the stream as it passes. It is the
-  // only copy: the platform keeps nothing, and by the time the turn ends the
-  // event that carried it is gone.
+  // only copy: the runtime keeps nothing, and by the time the turn ends the event
+  // that carried it is gone.
   let userText = "";
 
-  const fields = turnFieldsFor(resolution.persona);
   const outcome = await runTurn(
-    config,
+    agent.runtime,
     {
-      ...fields,
-      // After the persona's own words, separated by a blank line, so the prompt the
-      // persona author wrote still opens the request and reads as one instruction
-      // with a footnote rather than as two. What the gadget reported is the gadget's
-      // own words restated, and nothing here paraphrases or interprets them (2.2).
       systemPrompt:
         input.gadgetCondition === undefined
-          ? fields.systemPrompt
-          : `${fields.systemPrompt}\n\n${input.gadgetCondition}`,
-      language,
-      // The gadget's, like the language above and read the same way — the pair is what the
-      // platform resolves a voice from, and neither is a property of the turn.
-      engine,
-      history: conversations.history(deviceId),
+          ? agent.systemPrompt
+          : `${agent.systemPrompt}\n\n${input.gadgetCondition}`,
+      enabledTopics: agent.topics,
+      answerMode: agent.answerMode,
+      language: agent.language,
+      engine: agent.engine,
+      history: conversations.history(gadget.deviceId),
+      ...(agent.llm === null ? {} : { llm: agent.llm }),
       ...(input.audio ? { audio: input.audio } : {}),
       ...(input.text !== undefined ? { text: input.text } : {}),
       ...(input.tools && input.tools.length > 0 ? { tools: input.tools } : {}),
@@ -240,22 +171,33 @@ export async function takeTurn(
     signal
   );
 
-  // A command the bridge answered itself is not a turn of this conversation (D8,
-  // requirement 4). The person said nothing to the interview and the platform answered
-  // nothing — what happened happened on the gadget — so recording it would put a
-  // question nobody put to the model into the history, followed by the silence where
-  // its answer should be, and the next interview turn would be asked against a
-  // conversation that never took place.
-  //
-  // The check is here, at the one recording site, rather than at each caller: a caller
-  // that forgot it would leave the defect to be found as the model answering a command
-  // nobody gave it. Nothing said in reply is the second half of the shape and not a
-  // repetition of it — a turn that *was* spoken for was answered, whatever its
-  // transcript happens to read as, and belongs in the history as much as any other.
+  // A turn cancelled because its gadget left is a turn nobody heard. The runtime produces
+  // faster than the device plays, and it can produce the whole reply after the socket has
+  // gone — measured twice on 2026-10-28 — so what was read from the stream is not what
+  // reached the device. The transcript keeps the question and records no answer, rather
+  // than seeding the next session with words that were never spoken.
+  const unheard = signal?.aborted === true && signal.reason === DEVICE_GONE;
+  const replyText = unheard ? "" : outcome.replyText;
+
+  // A command the bridge answered itself is not a turn of this conversation: the
+  // person said nothing to the agent and it answered nothing — what happened
+  // happened on the gadget. Recording it would put a question nobody put to the
+  // model into the history, followed by the silence where its answer should be.
   const answeredByTheBridge =
-    outcome.replyText === "" && matchCommand(language, userText, { music: config.musicDir !== "" }) !== null;
+    replyText === "" && matchCommand(agent.language, userText, { music: config.musicDir !== "" }) !== null;
   if (!answeredByTheBridge) {
-    conversations.record(deviceId, { user: userText, agent: outcome.replyText });
+    conversations.record(gadget.deviceId, { user: userText, agent: replyText });
+    // Fire-and-forget: the reply has already been spoken, and a record is never
+    // allowed to delay or shorten it.
+    registry.recordTurn({
+      deviceId: gadget.deviceId,
+      userText,
+      assistantText: replyText,
+      language: agent.language,
+      engine: agent.engine,
+      startedAt,
+      endedAt: new Date(),
+    });
   }
   return { served: true, userText, outcome };
 }

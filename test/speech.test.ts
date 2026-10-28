@@ -29,11 +29,9 @@ const config: BridgeConfig = {
   otaPort: 8003,
   wsPort: 8001,
   publicHost: "127.0.0.1",
-  deviceSecret: "s".repeat(43),
-  allowedDevices: [],
-  devicePersonas: new Map(),
-  platformUrl: "http://127.0.0.1:4000",
-  apiAuthToken: "t".repeat(16),
+  consoleUrl: "http://127.0.0.1:3001",
+  consoleToken: "console-token-abcdefgh",
+  registryTtlMs: 60_000,
   framing: 3,
   serverRate: RATE,
   frameMs: FRAME_MS,
@@ -43,9 +41,6 @@ const config: BridgeConfig = {
   musicGainDb: MUSIC_GAIN_DB_DEFAULT,
   historyTurns: 20,
   commandStep: 10,
-  deviceLanguages: new Map(),
-  deviceEngines: new Map(),
-  devicePartners: new Map(),
   handoverMs: 400,
 };
 
@@ -238,6 +233,34 @@ describe("the bracket around a reply", () => {
         { type: "tts", state: "sentence_start", text: "sentence 0" },
       ],
       "the stop is not sent into a closed socket, and the drop is logged where it happened"
+    );
+  });
+
+  it("stops at the first sentence after the socket goes, and reports it once", () => {
+    // A reply whose socket closes mid-stream used to discover the close once per
+    // sentence: the bracket's own send failed first, and the guard that says "this
+    // device is gone" was only set in the frame path a dead socket never reaches. Four
+    // sentences produced four warnings for one closure (measured 2026-10-28).
+    const socket = fakeSocket();
+    const speaker = speakerFor(socket);
+    socket.readyState = 3; // CLOSED
+
+    const lines: string[] = [];
+    const original = console.log;
+    console.log = (...a: unknown[]): void => void lines.push(a.map(String).join(" "));
+    try {
+      speaker.speak(sentence(0, wav(1)));
+      speaker.speak(sentence(1, wav(1)));
+      speaker.speak(sentence(2, wav(1)));
+    } finally {
+      console.log = original;
+    }
+
+    assert.deepEqual(socket.sent, [], "nothing at all is sent to a socket that is gone");
+    assert.equal(
+      lines.filter((l) => l.includes("socket is not open")).length,
+      1,
+      "the close is reported once, not once per sentence"
     );
   });
 });
