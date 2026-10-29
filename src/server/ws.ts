@@ -358,7 +358,8 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
           prepareTurn: (text) => runWithDevice(deviceId, () => prepareTurn(text)),
           releaseTurn: () => runWithDevice(deviceId, releasePrepared),
           dropTurn: () => runWithDevice(deviceId, dropPrepared),
-          busy,
+          // The partner asks what the room is held by, which is more than a turn: see `roomHold`.
+          busy: roomHold,
         });
         log(`the exchange: paired with ${partnerId} — the two take turns`);
       }
@@ -491,8 +492,10 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
         // to take the next one — it is in the same state it would have been in had the
         // person never spoken (6.3).
         err(
-          `the utterance held nothing decodable (${upload.failed} frame(s)) — sending no turn ` +
-            `rather than an empty one`
+          upload.failed > 0
+            ? `the utterance held nothing decodable (${upload.failed} frame(s)) — sending no turn ` +
+                `rather than an empty one`
+            : `no utterance was located in the window — sending no turn rather than a guessed slice`
         );
         return;
       }
@@ -879,6 +882,22 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
     }
 
     /**
+     * What this session holds against the room, for its partner's sake (D4).
+     *
+     * Its own input path needs only `busy()`: the frames it would drop in the tail are the tail of
+     * its own speaker, and the drain guard below drops them, with a line that says which of the two
+     * problems it is. Its partner has no such guard, because the speaker is not that session's —
+     * so what it is told is the turn *and* the audio that turn is still playing out. A turn stops
+     * `turning` when the platform's stream ends, which is much earlier than the speaker stops:
+     * measured on the boards 2026-10-29, 17.6 s earlier. Everything the other microphone hears in
+     * that gap is this one's voice, and it was being judged as a person speaking there.
+     */
+    function roomHold(): boolean {
+      const until = speaker.drainingUntil();
+      return busy() || (until !== null && clock() < until);
+    }
+
+    /**
      * Whether the room is in the middle of an exchange (D4).
      *
      * Covers both halves — this session's own turn, and its partner's — which is the half a
@@ -1011,7 +1030,14 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
         if (partnerId !== undefined && roomBusy()) {
           session.held += 1;
           if (session.held === 1) {
-            info(`not judging input — an exchange is in flight in this room (D4)`);
+            // Which half of the room is holding it, named: a listener silenced by its own turn and
+            // one silenced by its partner's playback are two different afternoons, and the defect
+            // this line was added for was invisible for exactly that reason.
+            info(
+              busy()
+                ? `not judging input — this gadget's own turn is still in flight (D4)`
+                : `not judging input — ${partnerId} has the floor (D4)`
+            );
           }
           return;
         }

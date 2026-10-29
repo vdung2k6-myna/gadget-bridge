@@ -274,12 +274,80 @@ describe("the endpointer, over frames", () => {
     }
   });
 
+  it("spends a window whose only speech is one stray frame, however long that window is", () => {
+    // The board's own figures, measured 2026-10-29. A counting window of 16 s is longer than
+    // the no-speech bound, so a single frame over the gate never ages out of it: the
+    // equality the giveup used to be written as could not be reached, the window lived on,
+    // and the cap then closed a turn on 0.54 s of scattered noise that the platform answered
+    // "nói". What a discarded window rests on is whether it heard an utterance, and one
+    // frame is not one.
+    const board: EndpointerConfig = {
+      ...config,
+      vadSilenceMs: 1500,
+      vadSpeechWindowMs: 16_000,
+      maxTurnMs: 16_000,
+    };
+    let now = 0;
+    const listening = createListening(board, () => now);
+    listening.open();
+
+    const verdicts: string[] = [];
+    const step = (f: Buffer): void => {
+      now += FRAME_MS;
+      verdicts.push(listening.frame(f));
+    };
+    for (let i = 0; i < 20; i++) step(roomFrame);
+    step(speechFrame);
+    let guard = 0;
+    while (verdicts.at(-1) === "wait" && guard++ < FRAMES(board.vadNoSpeechMs) + 10) {
+      step(roomFrame);
+    }
+
+    assert.ok(!verdicts.includes("turn"), "one stray frame closed a turn");
+    assert.equal(
+      verdicts.at(-1),
+      "giveup",
+      "one stray frame spent the window rather than holding it open"
+    );
+  });
+
   it("holds a turn open past the cap when the person never stops, and closes it", () => {
+    // A person who does not pause fills the counting window, which is what the cap's own
+    // question — is speech occupying the window? — has to be answered by. Ten frames is
+    // what the cap used to accept; that is a burst, and the test below says so.
     const v = createVad(0);
-    for (let i = 0; i < 10; i++) vadStep(v, 12000, config);
+    for (let i = 0; i < FRAMES(ENDPOINTER_DEFAULTS.vadSpeechWindowMs); i++) vadStep(v, 12000, config);
     const cap = ENDPOINTER_DEFAULTS.maxTurnMs;
     assert.equal(vadDecision(v, cap - FRAME_MS, config), "wait");
     assert.equal(vadDecision(v, cap, config), "turn", "the backstop for a person who never stops");
+  });
+
+  it("does not close a turn at the cap on speech scattered rather than sustained", () => {
+    // The board, 2026-10-29: nine frames over the gate, the counting window's bound reached,
+    // and a turn closed on 0.54 s of them. Nine frames are an utterance's worth by count and
+    // not by occupation, and that is the distinction the cap now makes.
+    const board: EndpointerConfig = {
+      ...config,
+      vadSilenceMs: 1500,
+      vadSpeechWindowMs: 16_000,
+      maxTurnMs: 16_000,
+    };
+    const scattered = createVad(0);
+    for (let i = 0; i < 9; i++) vadStep(scattered, 12000, board);
+    assert.ok(scattered.speechMs >= board.vadMinSpeechMs, "nine frames are an utterance's worth");
+    assert.equal(
+      vadDecision(scattered, board.maxTurnMs, board),
+      "wait",
+      "the cap closed a turn on nine frames of a 16 s window"
+    );
+
+    const sustained = createVad(0);
+    for (let i = 0; i < FRAMES(board.vadSpeechWindowMs); i++) vadStep(sustained, 12000, board);
+    assert.equal(
+      vadDecision(sustained, board.maxTurnMs, board),
+      "turn",
+      "a person who fills the window is still answered at the cap"
+    );
   });
 });
 
@@ -341,15 +409,15 @@ describe("the 37 turns on record, replayed", () => {
   /** One recorded turn, driven back through the state machine at its recorded peak.
    *  Twenty frames of room first, because the floor estimate needs ten quiet frames
    *  before it stops reading zero, and every window in the field opens that way. */
-  function replay(fr: number, peak: number): string {
+  function replay(fr: number, peak: number, cfg: EndpointerConfig = config): string {
     const v = createVad(0);
-    for (let i = 0; i < 20; i++) vadStep(v, 400, config);
-    for (let i = 0; i < fr; i++) vadStep(v, peak, config);
+    for (let i = 0; i < 20; i++) vadStep(v, 400, cfg);
+    for (let i = 0; i < fr; i++) vadStep(v, peak, cfg);
     let now = (20 + fr) * FRAME_MS;
-    for (let i = 0; i < FRAMES(ENDPOINTER_DEFAULTS.vadNoSpeechMs); i++) {
-      const verdict = vadDecision(v, now, config);
+    for (let i = 0; i < FRAMES(cfg.vadNoSpeechMs); i++) {
+      const verdict = vadDecision(v, now, cfg);
       if (verdict !== "wait") return verdict;
-      vadStep(v, 400, config);
+      vadStep(v, 400, cfg);
       now += FRAME_MS;
     }
     return "wait";
@@ -378,6 +446,33 @@ describe("the 37 turns on record, replayed", () => {
         "turn",
         `${turn.fr} frames (peak ${turn.peak}) no longer closes a turn, and it was ${JSON.stringify(turn.text)}`
       );
+    }
+  });
+
+  it("draws the same line at the settings the board actually runs", () => {
+    // The deployment's own figures, measured 2026-10-29, and different from the defaults in
+    // all three endpointer settings. The corpus was recorded at the defaults, so replaying it
+    // here is what says the line follows the rule rather than the settings. Both windows are
+    // replayed because the misfire needed the longer one: today's board counts speech over
+    // 3 s, while the window on record when the cap closed on scattered noise counted it over
+    // 16 s — longer than the no-speech bound, which is what let one stray frame keep it alive.
+    for (const [name, windowMs] of [
+      ["the board as it runs today", 3000],
+      ["the window that misfired", 16_000],
+    ] as const) {
+      const board: EndpointerConfig = {
+        ...config,
+        vadSilenceMs: 1500,
+        vadSpeechWindowMs: windowMs,
+        maxTurnMs: 16_000,
+      };
+      for (const turn of CORPUS) {
+        assert.equal(
+          replay(turn.fr, turn.peak, board),
+          turn.fr >= 9 ? "turn" : "giveup",
+          `${turn.fr} frames (peak ${turn.peak}) at ${name}`
+        );
+      }
     }
   });
 });
@@ -435,6 +530,34 @@ describe("which part of the window to upload", () => {
     assert.ok(upload.some((f) => f.voiced), "and carried both phrases");
   });
 
+  it("carries the sustained part of a window whose room never falls quiet", () => {
+    // The boards, 2026-10-29: sixteen seconds uploaded six times to carry 2.3-3.0 s of speech,
+    // answered "ừ", "đi", "đi", "đi", "đi", "đi". No quiet run reaches the silence threshold in a
+    // room that crosses the gate this often, so the gap search reaches the window's start; what
+    // stops the walk instead is speech ceasing to be sustained.
+    const board: EndpointerConfig = {
+      ...config,
+      vadSilenceMs: 1500,
+      vadSpeechWindowMs: 3000,
+      maxTurnMs: 16_000,
+    };
+    const total = FRAMES(16_000);
+    const speech = Array.from({ length: 39 }, (_, i) => total - 39 + i);
+    const room = Array.from({ length: 12 }, (_, i) => 5 + i * 20);
+    const frames = window({ total, voiced: [...room, ...speech] });
+    const { frames: upload, onset } = utteranceFrames(frames, board);
+
+    assert.ok(
+      onset > total - FRAMES(4_000),
+      `the onset is at the utterance rather than at the window's start (was ${onset})`
+    );
+    assert.ok(
+      upload.length <= FRAMES(4_000),
+      `the upload is the speech rather than the window (${upload.length} frame(s))`
+    );
+    assert.ok(upload.length >= 39, "and the utterance it closed on is carried whole");
+  });
+
   it("caps the upload at one turn's length, whatever the onset says", () => {
     const frames = window({ total: 900, voiced: [0, 899] });
     const { frames: upload } = utteranceFrames(frames, config);
@@ -444,11 +567,13 @@ describe("which part of the window to upload", () => {
     );
   });
 
-  it("uploads the whole window and says so when there was no speech to trim by", () => {
+  it("locates nothing in a window that heard no speech, and sends none of it", () => {
+    // The spec's "cannot locate" case. Uploading the window instead was the guess the requirement
+    // forbids, and in the field it was the guess that came back as invented words.
     const frames = window({ total: 40, voiced: [] });
     const { frames: upload, onset } = utteranceFrames(frames, config);
-    assert.equal(onset, -1, "a negative onset is how 'there was nothing to trim by' is said");
-    assert.equal(upload.length, 40, "and the caller uploads the window rather than a guessed slice");
+    assert.equal(onset, -1, "a negative onset is how 'no utterance to locate' is said");
+    assert.equal(upload.length, 0, "and no guessed slice of the window is sent");
   });
 });
 

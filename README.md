@@ -219,7 +219,11 @@ partner whose input is the reply's own text — not a transcription of what the
 partner heard. The partner's turn is asked while the first is still speaking and
 spoken when the first reports it has begun listening, plus `BRIDGE_HANDOVER_MS`.
 While an exchange is in flight neither microphone is judged, and the wake word
-ends it. A deployment that pairs nothing reaches none of it.
+ends it. An exchange is in flight until the gadget that was speaking has finished
+*playing*, not merely until its reply has arrived: the reply is produced faster
+than it is heard, and what the other microphone returns in between is that voice
+through the room rather than a person. A deployment that pairs nothing reaches
+none of it.
 
 ### Music, and commands answered here
 
@@ -242,6 +246,19 @@ finished speaking: a gate on the room's own noise floor, a minimum amount of
 speech, and a silence threshold, all of which are settings rather than constants
 (`BRIDGE_VAD_*`, `BRIDGE_MAX_TURN_MS`). A window in which nobody spoke produces no
 turn however loud the room is.
+
+A turn is also closed at `BRIDGE_MAX_TURN_MS`, so that someone who never pauses is
+still answered — but only while speech fills the counting window, because a burst of
+noise that merely accumulated in it is not a person who never paused. A window that
+never heard an utterance is spent without a turn, whether the sounds in it were a few
+or none, so a quiet room does not leave a window open until a stray frame makes it a
+turn.
+
+What a turn carries is the utterance and not the window, and in a room that never falls
+quiet enough to offer the silence that ends one, it is the sustained part of the window
+that is carried — the stretch the person actually filled. A window in which no speech
+can be located at all is not sent: a slice guessed at the window's length is how a
+transcription comes back with words nobody said.
 
 A session nobody speaks into ends after `BRIDGE_SESSION_IDLE_MS`, measured by what
 a person was behind and by what the bridge still has to play — not by the bytes

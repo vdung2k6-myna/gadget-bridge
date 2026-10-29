@@ -1934,6 +1934,58 @@ describe("two paired gadgets take turns", () => {
     }
   });
 
+  it("does not judge the listener while its partner is still playing its reply", async () => {
+    // The field case of 2026-10-29: the partner's last sentence left the platform 17.6 s before its
+    // speaker stopped, and the listener took a turn out of that voice. A turn stops `turning` when
+    // its stream ends; the speaker keeps playing what it was already given.
+    const platform = await stubPlatform(
+      (res, call) => {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.write(sse("user", { text: call === 0 ? "hello" : "the first gadget's words" }));
+        // The partner's reply outlasts the first gadget's own drain guard, which is the only stretch
+        // in which the old rule left this microphone judged: before it, the drain dropped the
+        // frames; after it, the partner had finished.
+        const seconds = call === 0 ? REPLY_SECONDS : 3;
+        res.write(sse("sentence", { index: 0, text: "said once", audioData: sentenceAudio(seconds) }));
+        res.write(sse("done", { fullText: "said once" }));
+        res.end();
+      },
+      CATALOG_TWO
+    );
+    const config = configFor(platform.url, { ...pair(), handoverMs: 50 });
+    const server = await startedServer(config, servicesFor(config));
+    const [first, second] = await twoListeningGadgets(server.port);
+    try {
+      first.speak();
+      await first.until(() => platform.requests.length === 2, "the partner's turn to be asked");
+      await first.until(
+        () => first.messages.some((m) => JSON.parse(m).type === "tts" && JSON.parse(m).state === "stop"),
+        "the first reply to finish being sent"
+      );
+      first.send({ type: "listen", state: "start", mode: "auto" });
+      await second.until(() => second.binaries.length > 0, "the partner's reply to start playing");
+
+      const { written } = await capturing(async () => {
+        // Past this gadget's own drain, and still inside the partner's three seconds of playback.
+        await new Promise((resolve) => setTimeout(resolve, 900));
+        first.speak();
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      });
+
+      assert.equal(platform.requests.length, 2, "a turn was taken from the partner's own voice");
+      assert.match(
+        written,
+        new RegExp(`not judging input — ${SECOND_DEVICE} has the floor`),
+        "and the log names the half of the room that held it"
+      );
+    } finally {
+      first.stop();
+      second.stop();
+      server.stop();
+      platform.stop();
+    }
+  });
+
   it("takes the floor for a gadget that never reports, and drops it when the turn is cancelled", async () => {
     // D5 — a board that never reports leaves the floor free at the bridge's own estimate of its
     // audio, so an exchange cannot stall on a gadget that has fallen silent.

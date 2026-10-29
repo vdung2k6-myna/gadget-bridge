@@ -168,12 +168,92 @@ export function vadStep(v: VadState, rms: number, config: EndpointerConfig): boo
   return voiced;
 }
 
-/** What the state says to do now: close the turn, give up on the window, or wait. */
+/**
+ * How much of the counting window speech must occupy before the turn cap may close a turn.
+ *
+ * The cap is a backstop for a person who does not pause, so what it must ask for is speech
+ * filling the window — not speech counted somewhere in it. Without this, a window held open on
+ * nine frames of scattered room noise closed a turn the moment its bound was reached: measured
+ * on the board 2026-10-29 at 15.96 s and 57.18 s, answered "nói dài." and "nói".
+ *
+ * A constant rather than a setting, on purpose. Every other endpointer figure is a measurement
+ * of a room or a voice; this one is a property of the rule, and a deployment free to lower it
+ * could put the misfire back while its own numbers still looked reasonable.
+ */
+const SUSTAINED_SHARE = 0.5;
+
+/** The share above, in the milliseconds `vadDecision` compares against. */
+const sustainedMs = (config: EndpointerConfig): number =>
+  Math.round(config.vadSpeechWindowMs * SUSTAINED_SHARE);
+
+/**
+ * What the state says to do now: close the turn, give up on the window, or wait.
+ *
+ * Three conditions, asking three different questions about the same window:
+ *
+ *   - **Silence after speech** — the person spoke and then stopped. This is the ordinary
+ *     close, and the only one that needs no backstop.
+ *   - **The cap** — the person has not stopped for longer than a turn may run. It exists so
+ *     that nobody is waited on indefinitely, so what it asks for is speech *occupying* the
+ *     counting window rather than speech counted somewhere in it. A burst that never filled
+ *     the window is not a person who never paused, and closing on one is how a turn came to
+ *     be taken from a room where nobody had spoken.
+ *   - **The giveup** — the window heard no utterance and is spent without a turn. It asks
+ *     whether an utterance's worth was heard, not whether there was exactly nothing: an
+ *     equality against zero lets one stray frame hold a window open for as long as the
+ *     counting window is long, and the cap then closes a turn on whatever accumulated.
+ *     Measured on the board 2026-10-29: a window alive 57.18 s, closed on 0.54 s of noise,
+ *     answered "nói".
+ */
 export function vadDecision(v: VadState, elapsedMs: number, config: EndpointerConfig): Verdict {
   if (v.speechMs >= config.vadMinSpeechMs && v.silenceMs >= config.vadSilenceMs) return "turn";
-  if (v.speechMs >= config.vadMinSpeechMs && elapsedMs >= config.maxTurnMs) return "turn";
-  if (v.speechMs === 0 && elapsedMs >= config.vadNoSpeechMs) return "giveup";
+  if (
+    v.speechMs >= config.vadMinSpeechMs &&
+    v.speechMs >= sustainedMs(config) &&
+    elapsedMs >= config.maxTurnMs
+  )
+    return "turn";
+  // An utterance's worth or nothing: below the minimum, the window is spent (above).
+  if (v.speechMs < config.vadMinSpeechMs && elapsedMs >= config.vadNoSpeechMs) return "giveup";
   return "wait";
+}
+
+/**
+ * Where the sustained run ending at `last` began, for a window with no quiet edge.
+ *
+ * At each point, the stretch a turn must at least be — `vadMinSpeechMs` — must be at least
+ * `SUSTAINED_SHARE` voiced, the share the cap asks for before it may close a turn in a room that
+ * never goes quiet. The walk stops at the first point where that fails, which is where speech
+ * stopped being continuous.
+ *
+ * The measure is that short stretch and not the counting window, and the difference is a cut
+ * sentence: a 2.3 s utterance inside a 3 s counting window is 78 % voiced at its end but drops
+ * under half almost a second before it begins, so a counting-window test would trim the utterance's
+ * own first second away. Measuring over the minimum turn asks the question the trim needs — is
+ * there speech here? — rather than the cap's — has there been enough of it lately?
+ *
+ * Local rather than the share of the whole candidate, because the whole-candidate figure is diluted
+ * by the silence the window opened into, and would walk a long utterance's start backwards into
+ * that silence even when every second of it was speech.
+ *
+ * The beginning of the recording is not evidence that speech was thin there: a walk that reaches
+ * before the first full stretch has found the window's own start, and returns it.
+ */
+function sustainedOnset(
+  frames: readonly ListeningFrame[],
+  last: number,
+  config: EndpointerConfig
+): number {
+  const windowFrames = Math.max(1, Math.round(config.vadMinSpeechMs / config.frameMs));
+  const needed = Math.max(1, Math.ceil(windowFrames * SUSTAINED_SHARE));
+  for (let i = last; i > 0; i--) {
+    const from = i - windowFrames + 1;
+    if (from < 0) return 0;
+    let voiced = 0;
+    for (let j = from; j <= i; j++) if (frames[j]!.voiced) voiced++;
+    if (voiced < needed) return Math.min(i + 1, last);
+  }
+  return 0;
 }
 
 /**
@@ -196,9 +276,9 @@ export function vadDecision(v: VadState, elapsedMs: number, config: EndpointerCo
  * minute earlier does not drag the onset onto itself. That gap is also exactly what
  * closed the turn, so the segment found here is the one the endpointer decided on.
  *
- * A negative onset means there was nothing to trim by — no speech was found — and the
- * caller uploads the whole window and says so, because a silently wrong slice is
- * worse than a big one.
+ * A negative onset means there was no utterance to locate at all — no frame in the
+ * window was voiced — and the caller sends no turn, because a window trimmed at a
+ * guessed position is the failure this function exists to prevent.
  */
 export function utteranceFrames(
   frames: readonly ListeningFrame[],
@@ -213,19 +293,27 @@ export function utteranceFrames(
       break;
     }
   }
-  if (last < 0) return { frames: [...frames], onset: -1 };
+  // No voiced frame is not a slice to guess at: there is no utterance in this window.
+  if (last < 0) return { frames: [], onset: -1 };
 
   const gapFrames = Math.max(1, Math.round(config.vadSilenceMs / config.frameMs));
   let first = last;
   let quiet = 0;
+  let foundGap = false;
   for (let i = last; i >= 0; i--) {
     if (frames[i]!.voiced) {
       quiet = 0;
       first = i;
     } else if (++quiet >= gapFrames) {
+      foundGap = true;
       break;
     }
   }
+  // Where the room never falls quiet enough to offer that gap — a window that crosses the gate
+  // every second or so, measured on the boards 2026-10-29 at 16.0 s uploaded for 2.3 s of speech —
+  // the walk above reaches the start and would carry the whole window. The fallback stops where
+  // speech stops being sustained instead.
+  if (!foundGap) first = sustainedOnset(frames, last, config);
 
   // A backstop on the upload itself, independent of the segment search: the
   // endpointer already bounds a turn at `maxTurnMs`, so nothing longer than that
@@ -322,18 +410,29 @@ export function createListening(config: EndpointerConfig, clock: () => number = 
 
     upload(): { wav: Buffer | null; seconds: number; failed: number } {
       const { frames: utterance, onset } = utteranceFrames(frames, config);
+      if (onset < 0) {
+        // No frame in the window was voiced, so there is no utterance to locate and nothing this
+        // function would send that it could call the person's. The window whole is the guess the
+        // requirement forbids — and the guess that came back as invented words in the field.
+        info(
+          `no utterance to upload: ${frames.length} frame(s) in the window, none of them voiced ` +
+            `— sending no turn rather than a guessed slice`
+        );
+        // Counted the way the upload would have counted them: a frame that would not decode is a
+        // failure the log has to keep, whether or not a later one is sent.
+        const failed = frames.filter((frame) => !frame.samples || frame.samples.length === 0).length;
+        return { wav: null, seconds: 0, failed };
+      }
+
       const result = framesToWav(
         utterance.map((frame) => frame.samples),
         config.deviceRate
       );
 
       info(
-        onset < 0
-          ? `uploading the whole window: ${utterance.length} frame(s) = ` +
-            `${((utterance.length * config.frameMs) / 1000).toFixed(1)}s — no onset to trim by`
-          : `uploading from speech onset: ${utterance.length} frame(s) = ` +
-            `${((utterance.length * config.frameMs) / 1000).toFixed(1)}s ` +
-            `(onset at frame ${onset}, ${((onset * config.frameMs) / 1000).toFixed(2)}s into the window)`
+        `uploading from speech onset: ${utterance.length} frame(s) = ` +
+          `${((utterance.length * config.frameMs) / 1000).toFixed(1)}s ` +
+          `(onset at frame ${onset}, ${((onset * config.frameMs) / 1000).toFixed(2)}s into the window)`
       );
       if (result.wav) {
         info(
