@@ -25,6 +25,18 @@ export interface BridgeConfig {
   /** The address named in the OTA response — one the device can route to. */
   publicHost: string;
   /**
+   * The public front that terminates TLS, as an http(s) base URL without a trailing
+   * slash, or null for the raw `host:port` this bridge advertises itself (read from
+   * `BRIDGE_PUBLIC_URL`).
+   *
+   * Set, it is what the OTA answer names and what the root page prints: the front
+   * proxies `/xiaozhi/ota/*` and `/xiaozhi/v1/*` to the ports above, so a device
+   * speaks `https` and `wss` while the bridge keeps listening on plain ports that no
+   * longer need opening to the internet. Null keeps every deployment that names
+   * nothing exactly as it was.
+   */
+  publicUrl?: string | null;
+  /**
    * Where the console is, as a base URL with no trailing slash. Required, and with no
    * default: a default would be localhost on a developer's machine and silently wrong
    * everywhere else.
@@ -410,6 +422,34 @@ function requireEndpointer(config: {
  * address had none before it: the only obvious default is localhost, which is right
  * on one machine and silently wrong on every other.
  */
+/**
+ * The public front a device is sent to, or null for the raw ports.
+ *
+ * Read as a base URL because that is what it is: one origin serving both the OTA
+ * path and the socket, with the scheme deciding whether the device speaks TLS.
+ * Absent is not an error — it is the raw `ws://host:port` answer every deployment
+ * gave before a front existed.
+ */
+function readPublicUrl(env: NodeJS.ProcessEnv): string | null {
+  const raw = env.BRIDGE_PUBLIC_URL?.trim() ?? "";
+  if (raw === "") return null;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(`BRIDGE_PUBLIC_URL must be an absolute URL, got ${JSON.stringify(raw)}`);
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error(`BRIDGE_PUBLIC_URL must be http or https, got ${JSON.stringify(raw)}`);
+  }
+  if (url.search !== "" || url.hash !== "") {
+    throw new Error(
+      `BRIDGE_PUBLIC_URL must be a base URL without a query or fragment, got ${JSON.stringify(raw)}`
+    );
+  }
+  return (url.origin + url.pathname).replace(/\/+$/, "");
+}
+
 function readConsoleUrl(env: NodeJS.ProcessEnv): string {
   const raw = env.BRIDGE_CONSOLE_URL ?? "";
   if (raw.trim() === "") {
@@ -516,6 +556,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
     otaPort: readInt(env, "OTA_PORT", 8003, PORT_MAX),
     wsPort: readInt(env, "WS_PORT", 8001, PORT_MAX),
     publicHost: localIp(env.BRIDGE_PUBLIC_HOST),
+    publicUrl: readPublicUrl(env),
     consoleUrl: readConsoleUrl(env),
     consoleToken: readConsoleToken(env),
     registryTtlMs: readInt(env, "BRIDGE_REGISTRY_TTL_MS", 60_000),

@@ -114,6 +114,38 @@ describe("the OTA endpoint", () => {
     }
   });
 
+  it("names the TLS front when one is configured, and the raw address when it is not", async () => {
+    // The device trusts this answer for both addresses, so a front that terminates
+    // TLS has to be what the answer names — the raw ports stay plain and are no
+    // longer opened to the internet.
+    const fronted = await startedServer(fakeRegistry(() => gadgetFor()), {
+      ...configFor(0),
+      publicUrl: "https://gw.example.test",
+    });
+    try {
+      const body = (await (await ask(fronted.port, { "device-id": BOARD })).json()) as {
+        websocket: { url: string };
+      };
+      assert.equal(body.websocket.url, "wss://gw.example.test/xiaozhi/v1/");
+
+      const page = await (await fetch(`http://127.0.0.1:${fronted.port}/`)).text();
+      assert.match(page, /ota {6}https:\/\/gw\.example\.test\/xiaozhi\/ota\//);
+      assert.match(page, /ws {7}wss:\/\/gw\.example\.test\/xiaozhi\/v1\//);
+    } finally {
+      fronted.stop();
+    }
+
+    const raw = await startedServer();
+    try {
+      const body = (await (await ask(raw.port, { "device-id": BOARD })).json()) as {
+        websocket: { url: string };
+      };
+      assert.equal(body.websocket.url, "ws://127.0.0.1:8001/xiaozhi/v1/", "no front named, no change");
+    } finally {
+      raw.stop();
+    }
+  });
+
   it("answers an unclaimed gadget with a code and still with the address", async () => {
     const registry = fakeRegistry(() => gadgetFor({ owned: false, activation: { code: "481902" } }));
     const { port, stop } = await startedServer(registry);

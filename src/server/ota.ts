@@ -23,6 +23,28 @@ import { RegistryError, type Registry } from "../registry.js";
  * this answer makes the gadget show and speak the code, and poll
  * `POST /xiaozhi/ota/activate` until it answers 200.
  */
+/**
+ * Where a device is told to connect, and where it asks for OTA.
+ *
+ * A deployment behind a TLS front names it in `BRIDGE_PUBLIC_URL`, and these
+ * answers carry `wss://`/`https://` for it: the front proxies `/xiaozhi/v1/*` and
+ * `/xiaozhi/ota/*` to the plain ports below. A deployment that names nothing gets
+ * the raw `host:port` this bridge advertises itself, which is what it answered
+ * before the setting existed.
+ */
+function advertisedWsUrl(config: BridgeConfig): string {
+  const base = config.publicUrl ?? null;
+  if (base === null) return `ws://${config.publicHost}:${config.wsPort}/xiaozhi/v1/`;
+  const scheme = base.startsWith("https://") ? "wss://" : "ws://";
+  return `${scheme}${base.replace(/^https?:\/\//, "")}/xiaozhi/v1/`;
+}
+
+function advertisedOtaUrl(config: BridgeConfig): string {
+  const base = config.publicUrl ?? null;
+  if (base === null) return `http://${config.publicHost}:${config.otaPort}/xiaozhi/ota/`;
+  return `${base}/xiaozhi/ota/`;
+}
+
 export function createOtaServer(config: BridgeConfig, registry: Registry): http.Server {
   const server = http.createServer(async (req, res) => {
     try {
@@ -42,8 +64,8 @@ export function createOtaServer(config: BridgeConfig, registry: Registry): http.
         res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
         res.end(
           `gadget-bridge\n` +
-            `ota      http://${config.publicHost}:${config.otaPort}/xiaozhi/ota/\n` +
-            `ws       ws://${config.publicHost}:${config.wsPort}/xiaozhi/v1/\n` +
+            `ota      ${advertisedOtaUrl(config)}\n` +
+            `ws       ${advertisedWsUrl(config)}\n` +
             `framing  v${config.framing}\n` +
             `downlink ${config.serverRate} Hz / ${config.frameMs} ms\n` +
             `console  ${config.consoleUrl}\n`
@@ -134,7 +156,7 @@ async function answerOta(
   const activation = gadget.activation;
   const payload = {
     websocket: {
-      url: `ws://${config.publicHost}:${config.wsPort}/xiaozhi/v1/`,
+      url: advertisedWsUrl(config),
       token: deriveToken(gadget.secret, normalizeDeviceId(rawDeviceId)),
       version: config.framing,
     },
@@ -171,7 +193,7 @@ async function answerOta(
   // the identifier is what an operator reads.
   log(
     gadget.owned
-      ? `-> 200 websocket ws://${config.publicHost}:${config.wsPort}/xiaozhi/v1/ (token issued to ${rawDeviceId})`
+      ? `-> 200 websocket ${advertisedWsUrl(config)} (token issued to ${rawDeviceId})`
       : `-> 200 websocket + activation for ${rawDeviceId} (unclaimed, code shown on the gadget)`
   );
   res.writeHead(200, { "Content-Type": "application/json" });
