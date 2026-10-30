@@ -44,7 +44,7 @@ const OWNED = {
     name: "assistant",
     systemPrompt: "be helpful",
     language: "vietnamese",
-    engine: "kokoro",
+    engine: "engine-a",
     answerMode: "generate",
     topics: ["Truyện cười"],
     runtime: { baseUrl: "http://127.0.0.1:4000", token: "runtime-token" },
@@ -55,6 +55,30 @@ const OWNED = {
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
+
+/** The three profiles as the console resolves them: keys decrypted, names kept for the record. */
+const PROVIDERS = {
+  stt: {
+    name: "audio.cpp",
+    baseUrl: "https://stt.example/v1",
+    model: "whisper-1",
+    apiKey: "sk-stt-abc",
+  },
+  tts: {
+    name: "engine-a-vi",
+    baseUrl: "https://tts.example/v1",
+    model: "tts-1",
+    voice: "alloy",
+    apiKey: "sk-tts-abc",
+  },
+  llm: {
+    name: "gpt-mini",
+    baseUrl: "https://api.openai.com/v1",
+    model: "gpt-4o-mini",
+    apiKey: "sk-llm-abc",
+    temperature: 0.3,
+  },
+};
 
 describe("resolving a gadget", () => {
   it("reuses a resolution inside the window, and asks again after it", async () => {
@@ -85,7 +109,7 @@ describe("resolving a gadget", () => {
     assert.equal(gadget.owned, true);
     assert.equal(gadget.secret, OWNED.secret);
     assert.equal(gadget.agent?.language, "vietnamese");
-    assert.equal(gadget.agent?.engine, "kokoro");
+    assert.equal(gadget.agent?.engine, "engine-a");
     assert.deepEqual(gadget.agent?.runtime, { baseUrl: "http://127.0.0.1:4000", token: "runtime-token" });
     assert.deepEqual(gadget.turns, [{ user: "xin chào", agent: "chào bạn" }]);
   });
@@ -128,7 +152,7 @@ describe("resolving a gadget", () => {
       })
     );
     const gadget = await registry.resolve("b8:1f:3f:4a:9b:01");
-    assert.deepEqual(gadget.agent?.llm, {
+    assert.deepEqual(gadget.agent?.providers.llm, {
       baseUrl: "https://api.openai.com/v1",
       model: "gpt-4o-mini",
       apiKey: "sk-live-abc123",
@@ -139,7 +163,7 @@ describe("resolving a gadget", () => {
   it("carries null when the agent names none", async () => {
     const registry = createRegistry(configFor(), async () => jsonResponse(OWNED));
     const gadget = await registry.resolve("b8:1f:3f:4a:9b:01");
-    assert.equal(gadget.agent?.llm, null);
+    assert.equal(gadget.agent?.providers.llm, null);
   });
 
   it("refuses a malformed model profile rather than half-reading it", async () => {
@@ -149,11 +173,75 @@ describe("resolving a gadget", () => {
     await assert.rejects(() => registry.resolve("b8:1f:3f:4a:9b:01"), /incomplete LLM profile/);
   });
 
-  it("refuses an engine the runtime does not name, rather than folding it", async () => {
+  it("carries each provider the console resolved, whole", async () => {
+    const registry = createRegistry(configFor(), async () =>
+      jsonResponse({ ...OWNED, agent: { ...OWNED.agent, providers: PROVIDERS } })
+    );
+    const gadget = await registry.resolve("b8:1f:3f:4a:9b:01");
+    assert.deepEqual(gadget.agent?.providers, PROVIDERS);
+  });
+
+  it("refuses half a speech provider rather than sending it", async () => {
+    // An endpoint with no model is a request that fails where the person cannot see why,
+    // so it is refused against the console's answer instead of on the wire.
+    const registry = createRegistry(configFor(), async () =>
+      jsonResponse({
+        ...OWNED,
+        agent: {
+          ...OWNED.agent,
+          providers: { stt: null, tts: { baseUrl: "https://tts.example/v1", voice: "alloy" }, llm: null },
+        },
+      })
+    );
+    await assert.rejects(() => registry.resolve("b8:1f:3f:4a:9b:01"), /incomplete tts provider/);
+  });
+
+  it("refuses a tts provider with no voice, which is the half that speaks", async () => {
+    const registry = createRegistry(configFor(), async () =>
+      jsonResponse({
+        ...OWNED,
+        agent: {
+          ...OWNED.agent,
+          providers: {
+            stt: null,
+            tts: { name: "silent", baseUrl: "https://tts.example/v1", model: "tts-1" },
+            llm: null,
+          },
+        },
+      })
+    );
+    await assert.rejects(() => registry.resolve("b8:1f:3f:4a:9b:01"), /tts provider with no voice/);
+  });
+
+  it("never writes a provider's key to the log", async () => {
+    const lines: string[] = [];
+    const original = console.log;
+    console.log = (...a: unknown[]) => {
+      lines.push(a.map(String).join(" "));
+    };
+    try {
+      const registry = createRegistry(configFor(), async () =>
+        jsonResponse({ ...OWNED, agent: { ...OWNED.agent, providers: PROVIDERS } })
+      );
+      await registry.resolve("b8:1f:3f:4a:9b:01");
+    } finally {
+      console.log = original;
+    }
+    const written = lines.join("\n");
+    for (const key of [PROVIDERS.stt.apiKey, PROVIDERS.tts.apiKey, PROVIDERS.llm.apiKey]) {
+      assert.ok(!written.includes(key), `the log carries no ${key}`);
+    }
+  });
+
+  it("carries an engine it does not recognise, because this bridge names no engine", async () => {
+    // The engine is a compatibility string for the runtime's legacy path: this
+    // bridge neither knows nor validates it, so a deployment may drop its audio
+    // stack without this repository knowing what was in it.
     const registry = createRegistry(configFor(), async () =>
       jsonResponse({ ...OWNED, agent: { ...OWNED.agent, engine: "whisper" } })
     );
-    await assert.rejects(() => registry.resolve("b8:1f:3f:4a:9b:01"), /engine "whisper"/);
+    const gadget = await registry.resolve("b8:1f:3f:4a:9b:01");
+    assert.equal(gadget.agent?.engine, "whisper");
   });
 });
 
@@ -238,7 +326,7 @@ describe("recording a turn", () => {
         userText: "a",
         assistantText: "b",
         language: "vietnamese",
-        engine: "kokoro",
+        engine: "engine-a",
         startedAt: new Date(),
         endedAt: new Date(),
       })

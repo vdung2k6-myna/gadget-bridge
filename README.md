@@ -161,19 +161,19 @@ An agent is everything a turn needs, and it lives in the console:
 | `topics` | the search scope its runtime may read |
 | `answerMode` | `generate`, or `material` — read from its topics |
 | `language` | how the person is heard, and how the reply is spoken |
-| `engine` | `kokoro`, `piper` or `supertonic` |
+| `llmProfile`, `sttProfile`, `ttsProfile` | the three providers: the model that answers, the transcriber that hears, the voice that speaks |
 | `runtime` | the base URL and credential that answer it |
-| `model` | the account's own OpenAI-compatible endpoint, where it names one; otherwise absent, and the runtime's default answers |
 
-The **voice** is not on that list, and deliberately: the runtime resolves it from
-`(engine, language)` itself. The console therefore offers no voice picker — a
-setting that would not be honoured is worse than no setting. One agent may serve
-several devices; a device has at most one agent and at most one partner.
+A provider profile is one OpenAI-compatible endpoint. The **tts** profile names
+both the engine — its `model` — and the voice — its `voice` — so there is no
+separate engine or voice field, and a profile the console does not name is not
+something a turn can ask for. A kind the agent names no profile for is answered by
+the runtime's own configured provider, exactly as before profiles existed. One
+agent may serve several devices; a device has at most one agent and at most one
+partner.
 
-An engine or language the runtime does not name is refused when the agent is
-saved, and again when it is resolved: the runtime folds an unknown value into one
-of its own rather than refusing it, so those two moments are the only places the
-mistake is visible.
+A profile that is not the account's, or is not the kind the agent is binding it as,
+is refused when the agent is saved, and again when it is resolved.
 
 ### The turn
 
@@ -185,11 +185,19 @@ self-describing — it looks no agent up — so everything it needs is in the re
 | A turn's field | Comes from |
 | --- | --- |
 | `systemPrompt`, `enabledTopics`, `answerMode` | the agent |
-| `language`, `engine` | the agent |
+| `language` | the agent |
+| `sttBaseUrl`, `sttModel`, `sttApiKey` | the agent's `stt` profile, absent when it names none |
+| `ttsBaseUrl`, `ttsModel`, `ttsVoice`, `ttsApiKey` | the agent's `tts` profile, absent when it names none |
+| `llmBaseUrl`, `llmModel`, `llmApiKey`, `llmTemperature` | the agent's `llm` profile, when it names one; all four absent otherwise, so the runtime asks its default exactly as before |
 | the device's identity (`Device-Id`) | the device, and the console's record of it |
 | `audio` | the device, per turn |
 | `history` | the conversation so far: memory, seeded from the console |
-| `llmBaseUrl`, `llmModel`, `llmApiKey`, `llmTemperature` | the agent's own model, when it names one; all four absent otherwise, so the runtime asks its default exactly as before |
+
+The turn names no `engine`: a `tts` profile's `model` is the synthesis engine and
+its `voice` is the voice, so a separate field has nothing left to say. The one
+exception is an agent that names no `tts` profile while its console still reports
+an engine — the window in which a console that predates profiles is still
+deployed — and then the turn carries that engine.
 
 The request goes through one place, `src/platform.ts`, where the runtime's
 credential becomes a header. It is the one credential that reaches the runtime,

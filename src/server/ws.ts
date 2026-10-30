@@ -178,7 +178,12 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
     // What was said to this gadget before the bridge restarted, read back from the
     // record the console kept.
     services.conversations.seed(resolved.deviceId, resolved.turns);
-    const binding = resolved.agent === null ? "no agent bound" : `${resolved.agent.language}/${resolved.agent.engine}`;
+    const binding =
+      resolved.agent === null
+        ? "no agent bound"
+        : `${resolved.agent.language}/${
+            resolved.agent.providers.tts?.name ?? resolved.agent.engine ?? "the runtime's default voice"
+          }`;
     /** The gadget this one converses with, or nothing where the deployment pairs none (D8). */
     const partnerId = resolved.partner ?? undefined;
     /**

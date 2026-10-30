@@ -30,19 +30,6 @@ import { warn } from "./log.js";
 /** The two languages the endpoint accepts; anything else it reads as English. */
 export type TurnLanguage = "english" | "vietnamese";
 
-/**
- * The endpoint's synthesis engines, whose voices are language-specific.
- *
- * Which one a deployment asks for is not a value here but configuration —
- * `BRIDGE_TURN_ENGINE`, read in `config.ts`. It is a setting rather than a
- * constant for the reason the endpointer's thresholds and the command step are:
- * which engine sounds right is a **feel**, settled by ear rather than by
- * argument, and a feel cannot be settled from a literal that has to be rebuilt to
- * change. The reason an absent engine is not "no preference" is
- * `TurnRequest.engine`'s; the history of the mirror this replaced is
- * `BridgeConfig.turnEngine`'s.
- */
-export type TurnEngine = "kokoro" | "piper" | "supertonic";
 
 /**
  * The endpoint's own error is not worth inventing here: the platform takes
@@ -81,10 +68,27 @@ export interface TurnAudio {
  * before this existed.
  */
 export interface RuntimeLlm {
+  /** The profile's name, for the turn record; the runtime does not need it. */
+  name?: string;
   baseUrl: string;
   model: string;
   apiKey: string;
   temperature: number | null;
+}
+
+/**
+ * A speech provider the console resolved for this agent.
+ *
+ * The name is carried for the turn record only; the runtime answers from the
+ * endpoint, model and voice. A key is present only for a provider that needs
+ * one, and is written into the body and never logged.
+ */
+export interface RuntimeProvider {
+  name?: string;
+  baseUrl: string;
+  model: string;
+  voice?: string;
+  apiKey?: string;
 }
 
 export interface TurnRequest {
@@ -101,21 +105,27 @@ export interface TurnRequest {
    */
   language: TurnLanguage;
   /**
-   * The synthesis engine, **required on every turn**, and required for a reason of
-   * the same shape as the language's: `validateEngine` folds an absent or unknown
-   * engine to `"kokoro"` *before* its own default is consulted, so a turn that
-   * dropped this field would ask for an engine the deployment did not choose. It
-   * would fail silently in the way that matters — the request looks complete, and
-   * only the sound is wrong.
+   * The engine, for a console that predates provider profiles.
    *
-   * Required in the type rather than defaulted in `turnForm`, so that "every turn
-   * names it" is a property of a turn rather than a hope about its call sites.
-   *
-   * One engine for every language. The *voice* is what varies with the language, and
-   * the platform resolves it from this and from `language` together — this service
-   * names no voice. What a deployment asks for is read from `BRIDGE_TURN_ENGINE`.
+   * A current console sends `tts` instead and leaves this undefined. The bridge
+   * keeps sending it only when no `tts` profile exists, so the deployment can roll
+   * forward console-last without a turn that names neither.
    */
-  engine: TurnEngine;
+  engine?: string;
+  /**
+   * The provider that hears this turn, or absent for the runtime's own.
+   *
+   * A profile carries its endpoint, model and (when it has one) key. The absent
+   * case is the deployment's audio.cpp, exactly as before profiles existed.
+   */
+  stt?: RuntimeProvider;
+  /**
+   * The provider that speaks this turn, or absent for the runtime's own.
+   *
+   * The engine is this profile's `model` and the voice its `voice`: there is no
+   * separate engine field, so a turn cannot name an engine its profile does not.
+   */
+  tts?: RuntimeProvider;
   history: readonly TurnMessage[];
   /** The model that answers this turn, or absent for the runtime's own. */
   llm?: RuntimeLlm;
@@ -228,11 +238,25 @@ export const DEVICE_GONE = Symbol.for("gadget-bridge.device-gone");
 export function turnForm(request: TurnRequest): FormData {
   const form = new FormData();
   form.append("language", request.language);
-  // Stated rather than omitted, and required by the type: an absent engine is a request
-  // for the platform's own default, not an absence of preference (see
-  // `TurnRequest.engine`). The platform resolves the voice from this and the language;
-  // the bridge does not name a voice.
-  form.append("engine", request.engine);
+  // A console that predates profiles still names an engine; a current one sends
+  // the tts profile below instead, and this is then absent.
+  if (request.tts === undefined && request.engine !== undefined) {
+    form.append("engine", request.engine);
+  }
+  // Absent — not empty — when the agent names no profile, so the runtime asks its
+  // own service as it always has. A profile's key is written into the body and
+  // never logged.
+  if (request.stt !== undefined) {
+    form.append("sttBaseUrl", request.stt.baseUrl);
+    form.append("sttModel", request.stt.model);
+    if (request.stt.apiKey !== undefined) form.append("sttApiKey", request.stt.apiKey);
+  }
+  if (request.tts !== undefined) {
+    form.append("ttsBaseUrl", request.tts.baseUrl);
+    form.append("ttsModel", request.tts.model);
+    form.append("ttsVoice", request.tts.voice ?? "");
+    if (request.tts.apiKey !== undefined) form.append("ttsApiKey", request.tts.apiKey);
+  }
   form.append("systemPrompt", request.systemPrompt);
   form.append(
     "history",

@@ -8,7 +8,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { WebSocket } from "ws";
 import { ENDPOINTER_DEFAULTS, MUSIC_GAIN_DB_DEFAULT, type BridgeConfig } from "../src/config.js";
-import type { TurnEngine, TurnLanguage } from "../src/turn.js";
+import type { RuntimeLlm, RuntimeProvider, TurnLanguage } from "../src/turn.js";
 import { createConversations } from "../src/conversation.js";
 import { deriveToken, normalizeDeviceId } from "../src/credentials.js";
 import type { Gadget, Registry } from "../src/registry.js";
@@ -159,7 +159,13 @@ async function stubPlatform(
 
 interface Speech {
   language: TurnLanguage;
-  engine: TurnEngine;
+  engine: string;
+  /** The providers the console resolved, where the test binds any. */
+  providers?: {
+    stt: RuntimeProvider | null;
+    tts: RuntimeProvider | null;
+    llm: RuntimeLlm | null;
+  };
 }
 
 /** What a config was built for beyond its environment: the console answers these now. */
@@ -196,8 +202,13 @@ const bindSpeech = (first: Speech, second: Speech): Partial<BridgeConfig> => {
 /** The same pair for both gadgets, which is what a one-gadget test wants. */
 const speech = (
   language: TurnLanguage = "english",
-  engine: TurnEngine = "supertonic"
-): Partial<BridgeConfig> => bindSpeech({ language, engine }, { language: "english", engine: "supertonic" });
+  engine: string = "engine-c",
+  providers?: Speech["providers"]
+): Partial<BridgeConfig> =>
+  bindSpeech(
+    { language, engine, ...(providers === undefined ? {} : { providers }) },
+    { language: "english", engine: "engine-c" }
+  );
 
 /**
  * The console, as these tests see it: a gadget owned by somebody, spoken through the
@@ -212,7 +223,7 @@ function registryFor(config: BridgeConfig): Registry {
   return {
     resolve: async (rawDeviceId): Promise<Gadget> => {
       const deviceId = normalizeDeviceId(rawDeviceId);
-      const bound = meta.speech.get(deviceId) ?? { language: "english", engine: "supertonic" };
+      const bound = meta.speech.get(deviceId) ?? { language: "english", engine: "engine-c" };
       const persona = activeCatalog[deviceId === SECOND_DEVICE ? 1 : 0] ?? activeCatalog[0]!;
       return {
         deviceId,
@@ -227,7 +238,7 @@ function registryFor(config: BridgeConfig): Registry {
           answerMode: persona.answerMode === "material" ? "material" : "generate",
           topics: persona.knowledgeTopics,
           runtime: { baseUrl: meta.url, token: PLATFORM },
-          llm: null,
+          providers: bound.providers ?? { stt: null, tts: null, llm: null },
         },
         partner: meta.partner.get(deviceId) ?? null,
         turns: recorded.get(deviceId) ?? [],
@@ -269,7 +280,7 @@ function configFor(platformUrl: string, overrides: Partial<BridgeConfig> = {}): 
   };
   META.set(config, {
     url: platformUrl,
-    speech: pendingSpeech ?? new Map([[FIRST_ID, { language: "english", engine: "supertonic" }]]),
+    speech: pendingSpeech ?? new Map([[FIRST_ID, { language: "english", engine: "engine-c" }]]),
     partner: pendingPair ?? new Map(),
   });
   pendingSpeech = undefined;
@@ -885,7 +896,7 @@ describe("a person speaks to the gadget", () => {
     // Neither the default engine nor the default language, so the turn can only carry these two
     // if they came out of the config it was driven with.
     const device = await spokenDevice(
-      configFor(platform.url, speech("vietnamese", "piper"))
+      configFor(platform.url, speech("vietnamese", "engine-b"))
     );
     try {
       device.send({ type: "hello", version: 3, transport: "websocket" });
@@ -904,8 +915,115 @@ describe("a person speaks to the gadget", () => {
         return body.slice(body.indexOf("\n\n", at) + 2, body.indexOf("\n--", at));
       };
 
-      assert.equal(field("engine"), "piper");
+      assert.equal(field("engine"), "engine-b");
       assert.equal(field("language"), "vietnamese", "and the two are separate fields, not one");
+    } finally {
+      device.stop();
+      platform.stop();
+    }
+  });
+
+  it("declares the profiles the console resolved, and no engine", async () => {
+    // A tts profile's model is the engine and its voice the voice, so a turn that names a
+    // profile has nothing left to say with `engine`. Read out of the multipart body the way
+    // the prompt is above: what is under test is the request that left the process.
+    const platform = await stubPlatform((res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(sse("user", { text: "xin chao" }));
+      res.write(sse("sentence", { index: 0, text: "Chao ban.", audioData: sentenceAudio(REPLY_SECONDS) }));
+      res.write(sse("done", { fullText: "Chao ban." }));
+      res.end();
+    });
+    const providers = {
+      stt: {
+        name: "audio.cpp",
+        baseUrl: "https://stt.example/v1",
+        model: "whisper-1",
+        apiKey: "sk-stt",
+      },
+      tts: {
+        name: "engine-a-vi",
+        baseUrl: "https://tts.example/v1",
+        model: "tts-1",
+        voice: "alloy",
+        apiKey: "sk-tts",
+      },
+      llm: null,
+    };
+    const device = await spokenDevice(
+      configFor(platform.url, speech("vietnamese", "engine-b", providers))
+    );
+    try {
+      device.send({ type: "hello", version: 3, transport: "websocket" });
+      await device.until(() => device.messages.some((m) => m.includes('"hello"')), "the server hello");
+
+      device.send({ type: "listen", state: "start", mode: "manual" });
+      device.speak();
+      await device.until(() => platform.requests.length === 1, "the turn to reach the platform");
+
+      const body = platform.requests[0]!.body.toString("utf8").replace(/\r\n/g, "\n");
+      const field = (name: string): string => {
+        const at = body.indexOf(`name="${name}"`);
+        assert.ok(at > 0, `the turn carried a ${name}`);
+        return body.slice(body.indexOf("\n\n", at) + 2, body.indexOf("\n--", at));
+      };
+
+      assert.equal(field("sttBaseUrl"), providers.stt.baseUrl);
+      assert.equal(field("sttModel"), providers.stt.model);
+      assert.equal(field("sttApiKey"), providers.stt.apiKey);
+      assert.equal(field("ttsBaseUrl"), providers.tts.baseUrl);
+      assert.equal(field("ttsModel"), providers.tts.model);
+      assert.equal(field("ttsVoice"), providers.tts.voice);
+      assert.equal(field("ttsApiKey"), providers.tts.apiKey);
+      assert.ok(!body.includes('name="engine"'), "a tts profile names the engine in its model");
+    } finally {
+      device.stop();
+      platform.stop();
+    }
+  });
+
+  it("omits a kind the agent names no profile for, rather than sending it empty", async () => {
+    // Absent rather than empty, because the runtime reads an absent kind as its own default:
+    // a deployment that configures no stt provider keeps working exactly as before.
+    const platform = await stubPlatform((res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(sse("user", { text: "xin chao" }));
+      res.write(sse("sentence", { index: 0, text: "Chao ban.", audioData: sentenceAudio(REPLY_SECONDS) }));
+      res.write(sse("done", { fullText: "Chao ban." }));
+      res.end();
+    });
+    const providers = {
+      stt: null,
+      tts: {
+        name: "engine-a-vi",
+        baseUrl: "https://tts.example/v1",
+        model: "tts-1",
+        voice: "alloy",
+      },
+      llm: null,
+    };
+    const device = await spokenDevice(
+      configFor(platform.url, speech("vietnamese", "engine-b", providers))
+    );
+    try {
+      device.send({ type: "hello", version: 3, transport: "websocket" });
+      await device.until(() => device.messages.some((m) => m.includes('"hello"')), "the server hello");
+
+      device.send({ type: "listen", state: "start", mode: "manual" });
+      device.speak();
+      await device.until(() => platform.requests.length === 1, "the turn to reach the platform");
+
+      const body = platform.requests[0]!.body.toString("utf8").replace(/\r\n/g, "\n");
+      const field = (name: string): string => {
+        const at = body.indexOf(`name="${name}"`);
+        assert.ok(at > 0, `the turn carried a ${name}`);
+        return body.slice(body.indexOf("\n\n", at) + 2, body.indexOf("\n--", at));
+      };
+
+      assert.ok(!body.includes('name="sttBaseUrl"'), "no stt fields without an stt profile");
+      assert.ok(!body.includes('name="sttModel"'), "not even the model");
+      assert.equal(field("ttsBaseUrl"), providers.tts.baseUrl, "and the kind it does name travels");
+      assert.ok(!body.includes('name="engine"'), "with the profile still naming the engine");
     } finally {
       device.stop();
       platform.stop();
@@ -2637,7 +2755,7 @@ describe("lines a session writes name the gadget", () => {
       // the same transcripts (design D7).
       assert.match(
         written,
-        named(" turn from speech: [\\d.]+s of the person's own voice \\(english/supertonic\\)"),
+        named(" turn from speech: [\\d.]+s of the person's own voice \\(english/engine-c\\)"),
         "and names the pair that turn is declared with"
       );
 
@@ -2726,8 +2844,8 @@ describe("two gadgets on one bridge", () => {
     const config = configFor(
       platform.url,
       bindSpeech(
-        { language: "vietnamese", engine: "piper" },
-        { language: "english", engine: "kokoro" }
+        { language: "vietnamese", engine: "engine-b" },
+        { language: "english", engine: "engine-a" }
       )
     );
     const server = await startedServer(config, servicesFor(config));
@@ -2763,11 +2881,11 @@ describe("two gadgets on one bridge", () => {
 
       // The pair each turn is declared with, which is what the platform resolves a voice from.
       assert.equal(fieldOf(1, "language"), "vietnamese", "the first gadget's turn declares its own language");
-      assert.equal(fieldOf(1, "engine"), "piper", "and its own engine");
+      assert.equal(fieldOf(1, "engine"), "engine-b", "and its own engine");
       assert.equal(fieldOf(2, "language"), "english", "the second gadget's declares its own");
-      assert.equal(fieldOf(2, "engine"), "kokoro", "and its own engine");
+      assert.equal(fieldOf(2, "engine"), "engine-a", "and its own engine");
       assert.equal(fieldOf(3, "language"), "vietnamese", "and the first gadget's next turn is unchanged");
-      assert.equal(fieldOf(3, "engine"), "piper", "in both");
+      assert.equal(fieldOf(3, "engine"), "engine-b", "in both");
     } finally {
       first.stop();
       second.stop();
@@ -2790,7 +2908,7 @@ describe("two gadgets on one bridge", () => {
     const platform = await stubPlatform(answers("turn off the music"), CATALOG_TWO);
     const config = configFor(platform.url, {
       musicDir: MUSIC,
-      ...bindSpeech({ language: "english", engine: "piper" }, { language: "vietnamese", engine: "piper" }),
+      ...bindSpeech({ language: "english", engine: "engine-b" }, { language: "vietnamese", engine: "engine-b" }),
     });
     const server = await startedServer(config, servicesFor(config));
     const [english, vietnamese] = await twoListeningGadgets(server.port);

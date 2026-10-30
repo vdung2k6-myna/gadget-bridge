@@ -3,7 +3,7 @@ import { normalizeDeviceId } from "./credentials.js";
 import { warn } from "./log.js";
 import type { RuntimeTarget } from "./platform.js";
 import type { HardwareReport } from "./protocol/hardware.js";
-import type { AnswerMode, RuntimeLlm, TurnEngine, TurnLanguage } from "./turn.js";
+import type { AnswerMode, RuntimeLlm, RuntimeProvider, TurnLanguage } from "./turn.js";
 
 /**
  * What a gadget is, as the console holds it.
@@ -24,12 +24,20 @@ export interface GadgetAgent {
   name: string;
   systemPrompt: string;
   language: TurnLanguage;
-  engine: TurnEngine;
+  /** The engine an older console named; absent once the console sends profiles. */
+  engine?: string;
   answerMode: AnswerMode;
   topics: string[];
   runtime: RuntimeTarget;
-  /** The account's own model, or null for the runtime's default. */
-  llm: RuntimeLlm | null;
+  /**
+   * The providers this agent names, per kind, or null for the runtime's default.
+   * The keys are decrypted by the console and reach only the runtime.
+   */
+  providers: {
+    stt: RuntimeProvider | null;
+    tts: RuntimeProvider | null;
+    llm: RuntimeLlm | null;
+  };
 }
 
 export interface GadgetTurn {
@@ -63,7 +71,12 @@ export interface RegistryTurn {
   userText: string;
   assistantText: string;
   language: string;
-  engine: string;
+  /** The engine a turn before profiles used; omitted by a current bridge. */
+  engine?: string;
+  /** The profiles that heard, spoke and answered, by name. */
+  sttProfile?: string;
+  ttsProfile?: string;
+  llmProfile?: string;
   startedAt: Date;
   endedAt: Date;
 }
@@ -94,7 +107,6 @@ export class RegistryError extends Error {
 }
 
 const LANGUAGES: readonly string[] = ["english", "vietnamese"];
-const ENGINES: readonly string[] = ["kokoro", "piper", "supertonic"];
 const CONSOLE_TIMEOUT_MS = 5000;
 
 type FetchImpl = typeof fetch;
@@ -220,6 +232,9 @@ export function createRegistry(
         assistantText: turn.assistantText,
         language: turn.language,
         engine: turn.engine,
+        sttProfile: turn.sttProfile,
+        ttsProfile: turn.ttsProfile,
+        llmProfile: turn.llmProfile,
         startedAt: turn.startedAt.toISOString(),
         endedAt: turn.endedAt.toISOString(),
       })
@@ -341,13 +356,21 @@ function parseAgent(payload: unknown, deviceId: string): GadgetAgent {
         "which the runtime does not name"
     );
   }
+  // A console that predates profiles names an engine; a current one names
+  // providers. The engine is carried as an opaque string for the runtime's
+  // legacy fallback: this bridge names no engine and validates none, so a
+  // deployment can drop its audio stack without this repository knowing it.
   const engine = typeof agent.engine === "string" ? agent.engine : "";
-  if (!ENGINES.includes(engine)) {
-    throw new RegistryError(
-      `the console answered agent ${JSON.stringify(deviceId)} with engine ${JSON.stringify(engine)}, ` +
-        "which the runtime does not name"
-    );
+  const providersPayload = agent.providers;
+  if (
+    providersPayload !== undefined &&
+    providersPayload !== null &&
+    typeof providersPayload !== "object"
+  ) {
+    throw new RegistryError(`the console answered malformed providers for ${JSON.stringify(deviceId)}`);
   }
+  const providers = (providersPayload ?? {}) as Record<string, unknown>;
+  const hasProviders = providersPayload !== undefined && providersPayload !== null;
 
   const runtime = agent.runtime;
   if (typeof runtime !== "object" || runtime === null) {
@@ -364,11 +387,62 @@ function parseAgent(payload: unknown, deviceId: string): GadgetAgent {
     name: String(agent.name ?? ""),
     systemPrompt: typeof agent.systemPrompt === "string" ? agent.systemPrompt : "",
     language: language as TurnLanguage,
-    engine: engine as TurnEngine,
+    ...(engine === "" ? {} : { engine }),
     answerMode,
     topics: Array.isArray(agent.topics) ? agent.topics.filter((t): t is string => typeof t === "string") : [],
     runtime: { baseUrl: target.baseUrl, token: target.token },
-    llm: parseLlm(agent.llm, deviceId),
+    providers: hasProviders
+      ? {
+          stt: parseSpeechProvider(providers.stt, "stt", deviceId),
+          tts: parseSpeechProvider(providers.tts, "tts", deviceId),
+          llm: parseLlm(providers.llm, deviceId),
+        }
+      : { stt: null, tts: null, llm: parseLlm(agent.llm, deviceId) },
+  };
+}
+
+/**
+ * A speech provider, or null for the runtime's default.
+ *
+ * Half a provider is refused rather than sent: an endpoint with no model is a
+ * request that fails where the person cannot see why. A `tts` provider with no
+ * voice is half of one in the same way — the voice is what it speaks, and the
+ * runtime refuses a tts turn that names none — so the refusal is made here,
+ * against the console's answer, rather than on the wire.
+ */
+function parseSpeechProvider(
+  payload: unknown,
+  kind: "stt" | "tts",
+  deviceId: string
+): RuntimeProvider | null {
+  if (payload === null || payload === undefined) return null;
+  if (typeof payload !== "object") {
+    throw new RegistryError(
+      `the console answered a malformed ${kind} provider for ${JSON.stringify(deviceId)}`
+    );
+  }
+  const provider = payload as Record<string, unknown>;
+  const baseUrl = typeof provider.baseUrl === "string" ? provider.baseUrl : "";
+  const model = typeof provider.model === "string" ? provider.model : "";
+  if (baseUrl === "" || model === "") {
+    throw new RegistryError(
+      `the console answered an incomplete ${kind} provider for ${JSON.stringify(deviceId)}`
+    );
+  }
+  const voice = typeof provider.voice === "string" ? provider.voice : "";
+  if (kind === "tts" && voice === "") {
+    throw new RegistryError(
+      `the console answered a tts provider with no voice for ${JSON.stringify(deviceId)}`
+    );
+  }
+  return {
+    ...(typeof provider.name === "string" ? { name: provider.name } : {}),
+    baseUrl,
+    model,
+    ...(voice === "" ? {} : { voice }),
+    ...(typeof provider.apiKey === "string" && provider.apiKey !== ""
+      ? { apiKey: provider.apiKey }
+      : {}),
   };
 }
 
@@ -391,6 +465,7 @@ function parseLlm(payload: unknown, deviceId: string): RuntimeLlm | null {
     throw new RegistryError(`the console answered an incomplete LLM profile for ${JSON.stringify(deviceId)}`);
   }
   return {
+    ...(typeof llm.name === "string" ? { name: llm.name } : {}),
     baseUrl: llm.baseUrl,
     model: llm.model,
     apiKey: llm.apiKey,

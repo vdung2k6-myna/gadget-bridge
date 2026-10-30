@@ -1,7 +1,7 @@
 import { normalizeDeviceId } from "./credentials.js";
 import { localIp } from "./net/local-ip.js";
 import type { FramingVersion } from "./protocol/framing.js";
-import type { TurnEngine, TurnLanguage } from "./turn.js";
+import type { TurnLanguage } from "./turn.js";
 
 /**
  * Everything the bridge reads from its environment, read once at start.
@@ -230,17 +230,6 @@ function readFraming(env: NodeJS.ProcessEnv): FramingVersion {
  * English the way the platform folds an unknown value, because that folding is the
  * failure D12 describes: an operator who typed `vi` would get a bridge that
  * transcribes Vietnamese as English and says nothing about it.
- */
-
-/**
- * A gadget's engine, as the endpoint's own three-word vocabulary — the same
- * validator as `asLanguage` above, one field over, and refusing to fold for the
- * same reason: the endpoint reads an unknown engine as `"kokoro"`, so folding here
- * too would turn a typo into a different voice with nothing in the log to say so.
- *
- * Neither reader has a default any more, and that is the change: a gadget that
- * named no engine used to speak through the deployment's, and now a gadget with no
- * binding is one the bridge refuses to start for (`requireBindings`).
  */
 
 /**
@@ -482,13 +471,13 @@ function refuseRetired(env: NodeJS.ProcessEnv): void {
     { name: "BRIDGE_ALLOWED_DEVICES", instead: "add the gadget in the console" },
     { name: "BRIDGE_DEVICE_PERSONAS", instead: "bind an agent to the gadget in the console" },
     { name: "BRIDGE_DEVICE_LANGUAGES", instead: "set the language on that agent in the console" },
-    { name: "BRIDGE_DEVICE_ENGINES", instead: "set the engine on that agent in the console" },
+    { name: "BRIDGE_DEVICE_ENGINES", instead: "set the tts profile on that agent in the console" },
     { name: "BRIDGE_DEVICE_PARTNERS", instead: "pair the two gadgets in the console" },
     { name: "BRIDGE_DEVICE_SECRET", instead: "the console holds a secret per gadget" },
     { name: "BRIDGE_PLATFORM_URL", instead: "an agent names its runtime address in the console" },
     { name: "API_AUTH_TOKEN", instead: "the console holds the runtime credential" },
     { name: "BRIDGE_LANGUAGE", instead: "set the language on the agent in the console" },
-    { name: "BRIDGE_TURN_ENGINE", instead: "set the engine on the agent in the console" },
+    { name: "BRIDGE_TURN_ENGINE", instead: "set the tts profile on the agent in the console" },
   ];
   for (const { name, instead } of retired) {
     if (env[name] === undefined) continue;

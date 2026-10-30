@@ -125,7 +125,7 @@ const REQUEST: TurnRequest = {
   enabledTopics: ["Truyện cười"],
   answerMode: "generate",
   language: "vietnamese",
-  engine: "supertonic",
+  engine: "engine-c",
   history: [{ role: "user", content: "xin chào" }],
   text: "hôm nay thế nào",
 };
@@ -193,22 +193,68 @@ describe("what a turn tells the platform the gadget can do", () => {
 
 describe("which engine a turn asks for", () => {
   it("asks for the engine the request carries, and the type is what makes it carried", () => {
-    // `validateEngine` folds an absent or unknown engine to `"kokoro"` before its own
+    // `validateEngine` folds an absent or unknown engine to `"engine-a"` before its own
     // default is consulted, so the bridge must name the engine it wants: omitting the
     // field is a request for a different engine rather than an absence of preference.
     // That is why `TurnRequest.engine` is required rather than defaulted in `turnForm`
     // — there is no value this function could supply that would be the caller's meaning.
     assert.equal(turnForm(REQUEST).get("engine"), REQUEST.engine);
-    assert.equal(turnForm({ ...REQUEST, engine: "kokoro" }).get("engine"), "kokoro");
+    assert.equal(turnForm({ ...REQUEST, engine: "engine-a" }).get("engine"), "engine-a");
   });
 
   it("keeps the engine and the language apart, because they select different things", () => {
     // The engine is what a deployment speaks through and does not vary with the
     // language. The language is what the *voice* varies with, and the platform resolves
     // the voice from the two of them together — this service names no voice.
-    const form = turnForm({ ...REQUEST, language: "english", engine: "piper" });
+    const form = turnForm({ ...REQUEST, language: "english", engine: "engine-b" });
     assert.equal(form.get("language"), "english");
-    assert.equal(form.get("engine"), "piper");
+    assert.equal(form.get("engine"), "engine-b");
+  });
+});
+
+describe("which providers a turn names", () => {
+  const STT = {
+    name: "audio.cpp",
+    baseUrl: "https://stt.example/v1",
+    model: "whisper-1",
+    apiKey: "sk-stt",
+  };
+  const TTS = {
+    name: "engine-a-vi",
+    baseUrl: "https://tts.example/v1",
+    model: "tts-1",
+    voice: "alloy",
+    apiKey: "sk-tts",
+  };
+
+  it("sends a profile's fields and no engine when the agent names one", () => {
+    // The profile's model *is* the engine, so the engine field has nothing left to
+    // say and is left off. The key goes into the body and nowhere else.
+    const form = turnForm({ ...REQUEST, stt: STT, tts: TTS });
+
+    assert.equal(form.get("sttBaseUrl"), STT.baseUrl);
+    assert.equal(form.get("sttModel"), STT.model);
+    assert.equal(form.get("sttApiKey"), STT.apiKey);
+    assert.equal(form.get("ttsBaseUrl"), TTS.baseUrl);
+    assert.equal(form.get("ttsModel"), TTS.model);
+    assert.equal(form.get("ttsVoice"), TTS.voice);
+    assert.equal(form.get("ttsApiKey"), TTS.apiKey);
+    assert.equal(form.get("engine"), null, "a tts profile names the engine in its model");
+  });
+
+  it("omits a kind the agent names no profile for", () => {
+    const form = turnForm({ ...REQUEST, tts: TTS });
+
+    assert.equal(form.get("sttBaseUrl"), null);
+    assert.equal(form.get("sttModel"), null);
+    assert.equal(form.get("ttsBaseUrl"), TTS.baseUrl);
+  });
+
+  it("sends no key when the provider needs none", () => {
+    const form = turnForm({ ...REQUEST, stt: { baseUrl: STT.baseUrl, model: STT.model } });
+
+    assert.equal(form.get("sttBaseUrl"), STT.baseUrl);
+    assert.equal(form.get("sttApiKey"), null);
   });
 });
 
