@@ -163,13 +163,18 @@ export function createRegistry(
     reportTools(rawDeviceId: string, tools: readonly { name: string; description: string }[]): void {
       const deviceId = normalizeDeviceId(rawDeviceId);
       void post("/api/bridge/tools", { deviceId, tools })
-        .then((response) => {
-          if (!response.ok) {
-            warn(
-              `the console did not take the tool catalogue for ${deviceId} (${response.status}) — ` +
-                `the session is unaffected and its page keeps what it had`
-            );
-          }
+        .then(async (response) => {
+          if (response.ok) return;
+          // The console refuses a catalogue whole and answers with the reasons — which
+          // tool, and which bound — so the line carries them: a bare 400 sent an
+          // operator looking at the network instead of at a description too long for
+          // the page that shows it.
+          const detail = await response.text().catch(() => "");
+          warn(
+            `the console did not take the tool catalogue for ${deviceId} (${response.status})` +
+              `${detail === "" ? "" : `: ${detail.slice(0, 300)}`} — ` +
+              `the session is unaffected and its page keeps what it had`
+          );
         })
         .catch((error: unknown) => {
           warn(
