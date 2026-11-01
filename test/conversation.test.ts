@@ -254,13 +254,27 @@ describe("holding a conversation", () => {
     );
   });
 
-  it("leaves out a side that is empty rather than sending it blank", () => {
-    // A refused turn has no reply; a turn with nothing recognised in it has no
-    // transcript. Either would otherwise reach the model as a turn nobody took.
+  it("keeps the person's line when a turn produced no answer", () => {
+    // A refused or interrupted turn has no answer; the question is what the next
+    // turn is owed. Only a turn the gadget left before hearing it is kept out of
+    // the history, and that is decided where the turn ends (`takeTurn`), not here.
     const conversations = createConversations(configFor("http://unused"));
     conversations.record("d", { user: "something said", agent: "" });
 
     assert.deepEqual(conversations.history("d"), [{ role: "user", content: "something said" }]);
+  });
+
+  it("keeps only answered turns when it seeds from the console", () => {
+    const conversations = createConversations(configFor("http://unused"));
+    conversations.seed("d", [
+      { user: "answered question", agent: "the answer" },
+      { user: "cancelled question", agent: "" },
+    ]);
+
+    assert.deepEqual(conversations.history("d"), [
+      { role: "user", content: "answered question" },
+      { role: "agent", content: "the answer" },
+    ]);
   });
 
   it("does not spend a turn on an exchange with nothing in it", () => {
@@ -511,11 +525,12 @@ describe("a device's turn, from the conversation's side", () => {
     }
   });
 
-  it("records no reply for a turn the gadget left before hearing it", async () => {
+  it("keeps a turn the gadget left before hearing it out of the history", async () => {
     // The socket closed after the runtime had started answering, and the runtime went on
     // producing after it had gone — measured twice on 2026-10-28. What was read from the
-    // stream is not what reached the gadget, so the transcript keeps the question and
-    // records no answer, rather than seeding the next session with words nobody heard.
+    // stream is not what reached the gadget. The console still records the turn; the
+    // model's history does not carry it, because its request would look pending and the
+    // next turn would act on it again.
     const platform = await stubPlatform();
     platform.reply((res) => {
       res.writeHead(200, { "content-type": "text/event-stream" });
@@ -554,8 +569,8 @@ describe("a device's turn, from the conversation's side", () => {
 
       assert.deepEqual(
         conversations.history("b81f3f4a9b01"),
-        [{ role: "user", content: "hôm nay trời đẹp" }],
-        "the question stands and the answer nobody heard does not"
+        [],
+        "a turn the gadget left before hearing it is not carried into the next one"
       );
     } finally {
       platform.stop();

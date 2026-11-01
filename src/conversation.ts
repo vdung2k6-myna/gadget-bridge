@@ -52,14 +52,19 @@ export function createConversations(config: BridgeConfig): Conversations {
     },
 
     seed(deviceId: string, turns: readonly GadgetTurn[]): void {
-      const kept = turns.filter((turn) => turn.user !== "" || turn.agent !== "").map((turn) => ({ ...turn }));
+      // A turn the console recorded without an answer is a turn nobody heard;
+      // carrying it after a restart would make its request look pending again.
+      const kept = turns.filter((turn) => turn.agent !== "").map((turn) => ({ ...turn }));
       while (kept.length > config.historyTurns) kept.shift();
       byDevice.set(deviceId, kept);
     },
 
     record(deviceId: string, exchange: TurnExchange): void {
       // A turn that produced nothing on either side is not a turn. Recording an
-      // empty exchange would spend a slot of the bound on it.
+      // empty exchange would spend a slot of the bound on it. A refused or
+      // interrupted turn keeps the person's line: the turn was heard, and the
+      // question is what the next turn is owed. Only the one the gadget left
+      // before hearing anything is kept out of the history, where it was recorded.
       if (exchange.user === "" && exchange.agent === "") return;
 
       const kept = byDevice.get(deviceId) ?? [];
@@ -188,7 +193,10 @@ export async function takeTurn(
   const answeredByTheBridge =
     replyText === "" && matchCommand(agent.language, userText, { music: config.musicDir !== "" }) !== null;
   if (!answeredByTheBridge) {
-    conversations.record(gadget.deviceId, { user: userText, agent: replyText });
+    // An unheard turn is not history the model is asked with: its request would
+    // still look pending, and the next turn would act on it again. The console
+    // records the turn below either way, so a person can still read what was said.
+    if (!unheard) conversations.record(gadget.deviceId, { user: userText, agent: replyText });
     // Fire-and-forget: the reply has already been spoken, and a record is never
     // allowed to delay or shorten it.
     registry.recordTurn({

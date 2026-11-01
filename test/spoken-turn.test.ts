@@ -3121,10 +3121,11 @@ describe("a gadget that goes away while it is being answered", () => {
     }
   });
 
-  it("ends a turn whose tool already succeeded when the socket goes, and keeps the question", async () => {
+  it("ends a turn whose tool already succeeded when the socket goes, and does not carry the question", async () => {
     // The second measured sequence: the gadget answers a tool call and its socket dies in the
     // same breath — the radio is playing, the confirmation reaches nobody. The turn must end
-    // cancelled, and the reconnected gadget must resume from the question alone.
+    // cancelled, and the reconnected gadget must not resume from a request nobody heard: its
+    // history would carry that request as pending and the next turn would act on it again.
     const TOOLS = [
       { name: "self.get_device_status", description: "…", inputSchema: { type: "object", properties: {} } },
       {
@@ -3212,7 +3213,7 @@ describe("a gadget that goes away while it is being answered", () => {
       const historyAt = body.indexOf('name="history"');
       assert.ok(historyAt > 0, "the reconnected turn carried a history");
       const history = body.slice(body.indexOf("\n\n", historyAt) + 2, body.indexOf("\n--", historyAt));
-      assert.ok(history.includes("toi muon nghe radio"), "the question the person asked is still there");
+      assert.ok(!history.includes("toi muon nghe radio"), "the turn the gadget left is not carried");
       assert.ok(!history.includes("Đang phát"), "and no answer nobody heard follows it");
     } finally {
       console.log = original;
