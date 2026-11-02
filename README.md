@@ -275,8 +275,8 @@ session leaves the gadget able to take another.
 
 ## A load test
 
-`scripts/load-test.ts` drives the running services and reports what came back. Two
-modes, because a deployment has two ceilings:
+`scripts/load-test.ts` drives the running services and reports what came back. Three
+modes, because a deployment has three ceilings:
 
 ```bash
 # How many turns the runtime can answer at once: the same request the bridge
@@ -292,6 +292,11 @@ RUNTIME_TOKEN=… npx tsx scripts/load-test.ts runtime --count 12   --llm-url ht
 # token is derived from, so no gadget is needed — but each leaves a pending claim
 # in the console until CLAIM_APPROVAL_TTL_MS.
 npx tsx scripts/load-test.ts bridge --count 50
+
+# The whole audio path: every device takes real turns, so the bridge's Opus,
+# endpointer, pacing and reply path are all exercised. See "A soak" below.
+npx tsx scripts/load-test.ts soak --count 100 --turns 3 --stagger --interval 25000 \
+  --ota http://127.0.0.1:8003/xiaozhi/ota/ --audio speech.wav
 ```
 
 `--console`/`--token` override the bridge's own `.env`; `--runtime-token` is the
@@ -302,6 +307,23 @@ script.
 What the numbers mean: a turn holds a model slot only while its reply is being
 produced, and `OLLAMA_MAX_CONCURRENT_REQUESTS` (default 12) bounds how many do at
 once. Beyond that turns queue, and one that waits past the 120 s chat timeout fails.
+
+### A soak
+
+`soak` needs devices the console knows and an agent to answer them. Seed them from
+the console against a database whose name ends in `_test`:
+
+```bash
+# in gadget-console, with that database in DATABASE_URL
+DATABASE_URL=… RUNTIME_TOKEN=… npm run seed:soak -- --count 100
+DATABASE_URL=… npm run seed:soak -- --cleanup
+```
+
+Point the seeded runtime at `scripts/stub-runtime.ts` (`--port 4100`) to measure the
+bridge alone, or at the real runtime for end-to-end. `--stagger` spaces the first
+turns over one interval — a cadence; without it they start together — a burst. Bridge
+counters come from `BRIDGE_METRICS_PORT` (loopback only), and the recorded runs are in
+[`docs/soak-results.md`](docs/soak-results.md).
 
 ## Credentials
 

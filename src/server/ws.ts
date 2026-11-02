@@ -10,6 +10,7 @@ import { authorizeDevice, describeDenial } from "../credentials.js";
 import { createGadget, type CommandOutcome } from "../gadget.js";
 import { createListening } from "../listening.js";
 import { err, info, log, runWithDevice, section, warn } from "../log.js";
+import { metrics } from "../metrics.js";
 import type { Gadget, Registry } from "../registry.js";
 import { advertisesTools } from "../protocol/mcp.js";
 import { isAbort, isHello, isListen, isMcp, parseClientMessage, serverHello } from "../protocol/messages.js";
@@ -213,6 +214,7 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
       /** Words the platform heard, which the device's display is told (6.2). */
       heard: 0,
     };
+    metrics.sessionOpened();
     // One clock for the session, injected rather than reached for (D13). Both
     // `speech.ts` and `listening.ts` measure against it — the drain guard against the
     // endpointer — so a replay that supplies its own clock sees one session's
@@ -572,6 +574,7 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
           `${asked.length === 0 ? "" : `: ${asked.join(" / ")}`}`
       );
 
+      metrics.turnStarted();
       try {
         // What the gadget last reported about itself, read once per turn and not
         // held: a turn is asked with the condition as it stands, and a gadget that
@@ -803,6 +806,7 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
       } catch (error) {
         err(`turn failed: ${error instanceof Error ? error.message : String(error)}`);
       } finally {
+        metrics.turnFinished();
         // Always, whether the turn spoke or not: the bracket belongs to the turn, and
         // one left open parks the device in `speaking`, where it discards whatever the
         // person says next. This is also what arms the drain guard for the turn just
@@ -955,6 +959,7 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
       turning = true;
       const controller = new AbortController();
       turn = controller;
+      metrics.turnStarted();
       try {
         const result = await takeTurn(
           config,
@@ -1001,6 +1006,7 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
       } catch (error) {
         err(`the partner's turn failed: ${error instanceof Error ? error.message : String(error)}`);
       } finally {
+        metrics.turnFinished();
         speaker.finish();
         if (turn === controller) turn = null;
         turning = false;
@@ -1034,6 +1040,7 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
         // apart. A deployment that pairs nothing reaches none of this.
         if (partnerId !== undefined && roomBusy()) {
           session.held += 1;
+          metrics.frameDropped();
           if (session.held === 1) {
             // Which half of the room is holding it, named: a listener silenced by its own turn and
             // one silenced by its partner's playback are two different afternoons, and the defect
@@ -1057,6 +1064,7 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
         const drainingUntil = speaker.drainingUntil();
         if (drainingUntil !== null && clock() < drainingUntil) {
           session.drained += 1;
+          metrics.frameDropped();
           if (session.drained === 1) {
             info(
               `dropping input until ${((drainingUntil - clock()) / 1000).toFixed(2)}s from now — ` +
@@ -1088,9 +1096,11 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
                 `no listening window is open (D9); counted, not judged`
             );
           }
+          metrics.frameDropped();
           return;
         }
 
+        metrics.frameJudged();
         const verdict = listening.frame(wire);
         if (verdict === "turn") {
           // The unambiguous evidence of a person: the endpointer heard an utterance and
@@ -1251,6 +1261,7 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
     ws.on(
       "close",
       underDevice((code: number) => {
+        metrics.sessionClosed();
         section("device disconnected");
         log(
           `session ${session.id} device ${deviceId} code ${code}; ${session.frames} frame(s), ` +

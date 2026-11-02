@@ -22,6 +22,14 @@ export interface BridgeConfig {
   otaPort: number;
   /** Where the device connects afterwards. */
   wsPort: number;
+  /**
+   * Where the loopback metrics endpoint listens, or null when it is off.
+   *
+   * Off by default: the counters exist so a soak can say what a session costs once
+   * frames are flowing, not so every deployment exposes process state. When set,
+   * the listener is bound to 127.0.0.1.
+   */
+  metricsPort?: number | null;
   /** The address named in the OTA response — one the device can route to. */
   publicHost: string;
   /**
@@ -198,6 +206,13 @@ function readInt(env: NodeJS.ProcessEnv, name: string, fallback: number, max = N
     throw new Error(`${name} must be a positive integer at most ${max}, got ${JSON.stringify(raw)}`);
   }
   return value;
+}
+
+/** A port that is off when the variable is absent or empty. */
+function readOptionalPort(env: NodeJS.ProcessEnv, name: string): number | null {
+  const raw = env[name];
+  if (raw === undefined || raw === "") return null;
+  return readInt(env, name, 1, PORT_MAX);
 }
 
 /** A positive number, integral or not — the floor ratio is the one knob that is
@@ -555,6 +570,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
   return {
     otaPort: readInt(env, "OTA_PORT", 8003, PORT_MAX),
     wsPort: readInt(env, "WS_PORT", 8001, PORT_MAX),
+    metricsPort: readOptionalPort(env, "BRIDGE_METRICS_PORT"),
     publicHost: localIp(env.BRIDGE_PUBLIC_HOST),
     publicUrl: readPublicUrl(env),
     consoleUrl: readConsoleUrl(env),

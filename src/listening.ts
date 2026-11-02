@@ -348,8 +348,17 @@ export interface Listening {
   close(): void;
 }
 
-export function createListening(config: EndpointerConfig, clock: () => number = Date.now): Listening {
-  let decoder: OpusDecoder = createOpusDecoder(config.deviceRate);
+export function createListening(
+  config: EndpointerConfig,
+  clock: () => number = Date.now,
+  createDecoder: (sampleRate: number) => OpusDecoder = createOpusDecoder
+): Listening {
+  // One decoder for the session, not one per window. Opening a window used to
+  // destroy and recreate it, and under a hundred sessions that churn — thousands of
+  // create/delete cycles through the decoder library — faulted in `OpusScript.del`
+  // and took the process down (`docs/soak-results.md`). What a window owns is its
+  // frames and its voice-activity state; those are reset below.
+  const decoder = createDecoder(config.deviceRate);
   let frames: ListeningFrame[] = [];
   let vad = createVad(clock());
 
@@ -362,8 +371,6 @@ export function createListening(config: EndpointerConfig, clock: () => number = 
 
   return {
     open(): void {
-      decoder.close();
-      decoder = createOpusDecoder(config.deviceRate);
       frames = [];
       vad = createVad(clock());
     },

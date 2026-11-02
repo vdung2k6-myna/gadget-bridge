@@ -1,4 +1,4 @@
-import OpusScript from "opusscript";
+import { Decoder, Encoder } from "@evan/opus";
 import { buildWav, parseWavAudio } from "./wav.js";
 
 /**
@@ -28,9 +28,12 @@ import { buildWav, parseWavAudio } from "./wav.js";
  * It decodes too, since the bridge carries speech in both directions: the device's
  * packets are the person's own voice (6.1), and this is where they are read back.
  * The two directions are asymmetric in a way worth keeping in view — the encoder is
- * built per sentence and thrown away, and the decoder is built per listening window
- * and thrown away, because Opus carries state and a stateful decoder is a decoder
- * whose answer depends on what it was handed before (D14).
+ * built per sentence and thrown away, and the decoder is built per session and lives
+ * until it ends, because Opus carries state and a stateful decoder is a decoder whose
+ * answer depends on what it was handed before (D14). A decoder per window was tried
+ * and faulted under many sessions; the library is `@evan/opus`, which holds hundreds
+ * of live instances, where `opusscript` held about seventy-nine
+ * (`docs/soak-results.md`).
  */
 
 /** The sample rates Opus accepts, which are therefore the only rates a
@@ -67,21 +70,23 @@ export function encodeOpusFrames(pcm: Buffer, channels: number, framing: OpusFra
 
   if (pcm.length === 0) return [];
 
-  const encoder = new OpusScript(sampleRate, channels, OpusScript.Application.AUDIO);
-  try {
-    const frames: Buffer[] = [];
-    for (let offset = 0; offset < pcm.length; offset += bytesPerFrame) {
-      const slice = pcm.subarray(offset, offset + bytesPerFrame);
-      // A final frame shorter than the rest is padded, not dropped. The tail of a
-      // buffer is the end of a word, and Opus cannot encode a partial frame, so
-      // the choice is between silence after the last phoneme and losing it.
-      const frame = slice.length === bytesPerFrame ? slice : padToFrame(slice, bytesPerFrame);
-      frames.push(encoder.encode(frame, samplesPerFrame));
-    }
-    return frames;
-  } finally {
-    encoder.delete();
+  const encoder = new Encoder({
+    channels: channels as 1 | 2,
+    sample_rate: sampleRate,
+    application: "audio",
+  });
+  const frames: Buffer[] = [];
+  for (let offset = 0; offset < pcm.length; offset += bytesPerFrame) {
+    const slice = pcm.subarray(offset, offset + bytesPerFrame);
+    // A final frame shorter than the rest is padded, not dropped. The tail of a
+    // buffer is the end of a word, and Opus cannot encode a partial frame, so
+    // the choice is between silence after the last phoneme and losing it.
+    const frame = slice.length === bytesPerFrame ? slice : padToFrame(slice, bytesPerFrame);
+    frames.push(Buffer.from(encoder.encode(frame)));
   }
+  // The encoder is left to the collector. It holds no resource a caller must give
+  // back: a sentence's encoder is short-lived, and the library has no release call.
+  return frames;
 }
 
 /**
@@ -110,11 +115,12 @@ export function transcodeSentence(wav: Buffer, framing: OpusFraming): Buffer[] {
 /**
  * The other direction: the device's Opus, decoded back to samples (6.1).
  *
- * One decoder per listening window, not one per process. Opus is stateful across
- * packets, and a decoder that has already run ahead of the window it is handed
- * decodes the same bytes into a different signal — so the rig's module-level
- * singleton is a defect rather than an optimisation, and two devices sharing one
- * would decode each other's audio (D14). `close()` releases it with the window.
+ * One decoder per session, not one per process and not one per window. Opus is
+ * stateful across packets, and a decoder that has already run ahead of the stream it
+ * is handed decodes the same bytes into a different signal — so the rig's module-level
+ * singleton is a defect rather than an optimisation, and two devices sharing one would
+ * decode each other's audio (D14). Recreating it per window was also a defect: the
+ * churn faulted under a hundred sessions. `close()` ends its life with the session.
  *
  * The rate is the **device's** — `BRIDGE_DEVICE_RATE`, 16000 Hz — and not the
  * 24000 the hello declares for the downlink. A decoder built at the wrong rate
@@ -124,19 +130,21 @@ export function transcodeSentence(wav: Buffer, framing: OpusFraming): Buffer[] {
 export interface OpusDecoder {
   /** One packet's samples, or null if the packet could not be decoded. */
   decode(packet: Buffer): Int16Array | null;
-  /** Release the decoder's WASM memory. Idempotent. */
+  /** Release the decoder. Idempotent. */
   close(): void;
 }
 
 export function createOpusDecoder(sampleRate: number): OpusDecoder {
-  const decoder = new OpusScript(asOpusRate(sampleRate), 1, OpusScript.Application.AUDIO);
+  const decoder = new Decoder({ channels: 1, sample_rate: asOpusRate(sampleRate) });
   let open = true;
 
   return {
     decode(packet: Buffer): Int16Array | null {
       if (!open || packet.length === 0) return null;
       try {
-        return toSamples(decoder.decode(packet));
+        const pcm = decoder.decode(packet);
+        if (pcm.length === 0) return null;
+        return toSamples(Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength));
       } catch {
         // A packet the decoder refuses is one frame of a window, not a failed turn:
         // the frames either side of it are still the person's voice, and the caller
@@ -146,9 +154,9 @@ export function createOpusDecoder(sampleRate: number): OpusDecoder {
     },
 
     close(): void {
-      if (!open) return;
+      // The library has no release call; the instance is left to the collector. What
+      // matters is that it is no longer read, which `open` enforces.
       open = false;
-      decoder.delete();
     },
   };
 }

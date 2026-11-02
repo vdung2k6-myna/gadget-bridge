@@ -2,6 +2,7 @@ import { loadConfig } from "./config.js";
 import { createConversations } from "./conversation.js";
 import { log, warn } from "./log.js";
 import { createRegistry } from "./registry.js";
+import { createMetricsServer } from "./server/metrics.js";
 import { createOtaServer } from "./server/ota.js";
 import { createWsServer } from "./server/ws.js";
 
@@ -35,6 +36,7 @@ const conversations = createConversations(config);
 
 createOtaServer(config, registry);
 createWsServer(config, { registry, conversations });
+if (config.metricsPort !== null && config.metricsPort !== undefined) createMetricsServer(config);
 
 const wsUrl = `ws://${config.publicHost}:${config.wsPort}/xiaozhi/v1/`;
 

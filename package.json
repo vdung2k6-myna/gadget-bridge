@@ -16,13 +16,14 @@
     "load-test": "tsx scripts/load-test.ts"
   },
   "dependencies": {
+    "@evan/opus": "^1.0.3",
     "mpg123-decoder": "^1.0.3",
-    "opusscript": "^0.1.1",
     "ws": "^8.22.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
     "@types/ws": "^8.5.13",
+    "opusscript": "^0.1.1",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"
   }

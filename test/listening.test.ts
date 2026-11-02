@@ -11,7 +11,7 @@ import {
   type ListeningFrame,
 } from "../src/listening.js";
 import { frame } from "../src/protocol/framing.js";
-import { encodeOpusFrames } from "../src/protocol/opus.js";
+import { encodeOpusFrames, type OpusDecoder } from "../src/protocol/opus.js";
 import { parseWavAudio } from "../src/protocol/wav.js";
 
 /**
@@ -40,6 +40,35 @@ const config: EndpointerConfig = {
   frameMs: FRAME_MS,
   ...ENDPOINTER_DEFAULTS,
 };
+
+describe("the decoder's life", () => {
+  it("is created once per session, not once per window", () => {
+    // The fault the soak found: a decoder destroyed and recreated on every window
+    // opening. A fake factory makes the count visible, so a future edit cannot
+    // quietly put the churn back.
+    let created = 0;
+    let released = 0;
+    const decoder: OpusDecoder = {
+      decode: () => null,
+      close: () => {
+        released += 1;
+      },
+    };
+
+    const listening = createListening(config, () => 0, () => {
+      created += 1;
+      return decoder;
+    });
+
+    listening.open();
+    listening.open();
+    listening.open();
+    listening.close();
+
+    assert.equal(created, 1);
+    assert.equal(released, 1);
+  });
+});
 
 /** A frame's worth of room tone, and one of someone talking over it. */
 function pcm(amplitude: number, phase = 0): Buffer {
