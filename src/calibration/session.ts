@@ -57,9 +57,9 @@ const TEXTS: Record<TurnLanguage, Texts> = {
     open: "Đây là buổi hiệu chuẩn. Thiết bị có thể im lặng — đó chính là điều đang đo. Bạn cứ từ từ.",
     phase: {
       quiet: "Hãy giữ yên lặng khoảng sáu mươi giây.",
-      normal: "Bây giờ nói chuyện bình thường trong khoảng sáu mươi giây, câu nào cũng được.",
-      loud: "Nói chuyện to hơn một chút trong khoảng sáu mươi giây.",
-      soft: "Nói nhỏ, như từ cuối phòng, trong khoảng sáu mươi giây.",
+      normal: "Bây giờ nói vài câu bình thường trong khoảng sáu mươi giây, ngắt một chút giữa các câu.",
+      loud: "Nói vài câu to hơn một chút trong khoảng sáu mươi giây, ngắt một chút giữa các câu.",
+      soft: "Nói vài câu nhỏ, như từ cuối phòng, trong khoảng sáu mươi giây, ngắt một chút giữa các câu.",
       "one-word": "Bây giờ chỉ nói một từ, ví dụ ừ.",
     },
     summary: (report) => {
@@ -75,9 +75,9 @@ const TEXTS: Record<TurnLanguage, Texts> = {
     open: "This is a calibration. The gadget may stay silent — that's what we're measuring. Take your time.",
     phase: {
       quiet: "Stay silent for about sixty seconds.",
-      normal: "Talk normally for about sixty seconds — any sentences you like.",
-      loud: "Talk a little louder for about sixty seconds.",
-      soft: "Talk softly, as if from across the room, for about sixty seconds.",
+      normal: "Talk normally for about sixty seconds — a few sentences, with a short pause between them.",
+      loud: "Talk a little louder for about sixty seconds — a few sentences, pausing briefly between them.",
+      soft: "Talk softly, as if from across the room, for about sixty seconds — a few sentences, pausing between them.",
       "one-word": "Now say just one word, like 'ừ'.",
     },
     summary: (report) => {
