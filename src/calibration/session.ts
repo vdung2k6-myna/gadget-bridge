@@ -182,6 +182,26 @@ export function createSession(deps: SessionDeps): Session {
     }
   }
 
+  /** The best window heard in `ms`, for the yes/no answer — the room closes windows too. */
+  async function collectBest(ms: number): Promise<Sample | null> {
+    collecting = true;
+    let best: Sample | null = null;
+    const until = Date.now() + ms;
+    try {
+      while (!stopped) {
+        const left = until - Date.now();
+        if (left <= 0) break;
+        const sample = await next(left);
+        if (sample === null) break;
+        if (best === null || sample.score > best.score) best = sample;
+      }
+    } finally {
+      collecting = false;
+      queue.length = 0;
+    }
+    return best;
+  }
+
   /** The next window, or null when `ms` passes without one. */
   function next(ms: number): Promise<Sample | null> {
     const queued = queue.shift();
@@ -282,10 +302,7 @@ export function createSession(deps: SessionDeps): Session {
 
       const recommendation = result.recommendation;
       if (recommendation !== null && !stopped) {
-        collecting = true;
-        const answer = await next(answerMs);
-        collecting = false;
-        queue.length = 0;
+        const answer = await collectBest(answerMs);
         let accepted = false;
         if (answer !== null) {
           const said = await deps.transcribe(answer.wav);
