@@ -203,6 +203,16 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
     const resolvedGadget = req.bridgeGadget;
     if (resolvedGadget === undefined) { ws.close(1011, "no resolution"); return; }
     const resolved: Gadget = resolvedGadget;
+    /**
+     * This device's gate values: its own applied pair when it has one, the deployment
+     * default otherwise. Resolved once for the connection; a calibration applied here
+     * updates this snapshot, and another device's does not reach it.
+     */
+    const gateValues: { probMin: number; minFrames: number } =
+      services.gateSettings?.forDevice(deviceId) ?? {
+        probMin: config.speechProbMin,
+        minFrames: config.speechMinFrames,
+      };
     // What was said to this gadget before the bridge restarted, read back from the
     // record the console kept.
     services.conversations.seed(resolved.deviceId, resolved.turns);
@@ -498,8 +508,14 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
         language,
         dir: config.calibrationDir,
         capture,
-        minFrames: services.gateSettings?.settings.minFrames ?? config.speechMinFrames,
-        apply: (threshold, minFrames) => services.gateSettings?.apply(threshold, minFrames),
+        minFrames: gateValues.minFrames,
+        apply: (threshold, minFrames) => {
+          const next = services.gateSettings?.applyFor(deviceId, threshold, minFrames);
+          if (next !== undefined) {
+            gateValues.probMin = next.probMin;
+            gateValues.minFrames = next.minFrames;
+          }
+        },
         notice: (message) => notice(message),
         speak: async (text) => {
           const audio = await speakInstruction(runtime, tts, language, text);
@@ -672,8 +688,8 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
       windowStats: WindowStats
     ): Promise<void> {
       const capture = services.capture ?? null;
-      const probMin = services.gateSettings?.settings.probMin ?? config.speechProbMin;
-      const minFrames = services.gateSettings?.settings.minFrames ?? config.speechMinFrames;
+      const probMin = gateValues.probMin;
+      const minFrames = gateValues.minFrames;
       let captured: CapturedWindow | null = null;
       if (upload.wav) {
         const gate = services.speechGate === undefined ? await speechGate() : services.speechGate;
@@ -710,7 +726,7 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
                 },
         };
 
-        if (score !== null && score.strong < (services.gateSettings?.settings.minFrames ?? config.speechMinFrames)) {
+        if (score !== null && score.strong < minFrames) {
           capture?.record({ ...evidence, decision: "dropped" });
           info(
             `dropped a window with no speech: ${score.strong}/${score.frames} frame(s) ` +
@@ -1399,7 +1415,7 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
             // best, so the room closing first does not become the sample.
             const active = calibrationSession;
             const wav = upload.wav;
-            const gateProbMin = services.gateSettings?.settings.probMin ?? config.speechProbMin;
+            const gateProbMin = gateValues.probMin;
             void (async () => {
               let gateInfo: {
                 threshold: number;

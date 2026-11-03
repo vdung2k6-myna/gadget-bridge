@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,6 +15,7 @@ import type { RuntimeLlm, RuntimeProvider, TurnLanguage } from "../src/turn.js";
 import { createConversations } from "../src/conversation.js";
 import { deriveToken, normalizeDeviceId } from "../src/credentials.js";
 import { createCapture } from "../src/calibration/capture.js";
+import { loadGateState } from "../src/calibration/settings.js";
 import type { Gadget, Registry } from "../src/registry.js";
 import type { SpeechGate } from "../src/speech-gate.js";
 import { createWsServer } from "../src/server/ws.js";
@@ -880,6 +881,69 @@ describe("a person speaks to the gadget", () => {
       );
     } finally {
       device.stop();
+      platform.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses each device's own calibration pair, over the deployment default", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "bridge-device-gate-"));
+    const statePath = join(dir, "applied.json");
+    writeFileSync(
+      statePath,
+      JSON.stringify({
+        default: { threshold: 0.5, minFrames: 3 },
+        devices: { [FIRST_ID]: { threshold: 0.9, minFrames: 3 } },
+      })
+    );
+    const platform = await stubPlatform((res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(sse("user", { text: "xin chao ban" }));
+      res.write(sse("done", { fullText: "" }));
+      res.end();
+    });
+    // Binds both gadgets' languages for the registry, then builds the config.
+    speech();
+    const config = configFor(platform.url, {
+      calibrationStatePath: statePath,
+      calibrationMode: "arm",
+      marginalPeakRatio: 1,
+    });
+    const gateSettings = loadGateState(config);
+    assert.equal(gateSettings.forDevice(FIRST_ID).probMin, 0.9);
+    assert.equal(gateSettings.forDevice(SECOND_DEVICE).probMin, 0.5);
+
+    const server = await startedServer(config, {
+      registry: registryFor(config),
+      conversations: createConversations(config),
+      gateSettings,
+      // The device whose pair is 0.9 gets nothing through; the other, at 0.5, does.
+      speechGate: {
+        async score(_samples, threshold = 0.5) {
+          return threshold > 0.5
+            ? { max: 0.1, mean: 0.1, frames: 10, strong: 0 }
+            : { max: 0.9, mean: 0.9, frames: 10, strong: 10 };
+        },
+      },
+    });
+    const first = await connect(server.port, BOARD);
+    const second = await connect(server.port, SECOND_BOARD);
+    try {
+      for (const device of [first, second]) {
+        device.send({ type: "hello", version: 3, transport: "websocket" });
+        await device.until(() => device.messages.some((m) => m.includes('"hello"')), "a hello");
+        device.send({ type: "listen", state: "start", mode: "manual" });
+      }
+      first.speak();
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      assert.equal(platform.requests.length, 0, "the 0.9 device's window was dropped");
+
+      second.speak();
+      await second.until(() => platform.requests.length === 1, "the default device's turn");
+    } finally {
+      first.stop();
+      second.stop();
+      server.stop();
       platform.stop();
       rmSync(dir, { recursive: true, force: true });
     }

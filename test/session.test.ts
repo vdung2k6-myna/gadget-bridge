@@ -46,17 +46,18 @@ describe("the gate state file", () => {
         calibrationMode: "arm" as const,
       };
       const state = loadGateState(config);
-      assert.equal(state.settings.probMin, 0.5);
-      assert.equal(state.settings.minFrames, 3);
+      assert.equal(state.forDevice("dev").probMin, 0.5);
+      assert.equal(state.forDevice("dev").minFrames, 3);
       assert.ok(existsSync(path), "the defaults are recorded at first registration");
 
-      state.apply(0.7, 4);
-      assert.equal(state.settings.probMin, 0.7);
-      assert.equal(state.settings.minFrames, 4);
+      state.applyFor("dev", 0.7, 4);
+      assert.equal(state.forDevice("dev").probMin, 0.7);
+      assert.equal(state.forDevice("dev").minFrames, 4);
+      assert.equal(state.forDevice("other").probMin, 0.5, "another device keeps the default");
 
       const again = loadGateState(config);
-      assert.equal(again.settings.probMin, 0.7);
-      assert.equal(again.settings.minFrames, 4);
+      assert.equal(again.forDevice("dev").probMin, 0.7);
+      assert.equal(again.forDevice("other").probMin, 0.5);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -73,7 +74,7 @@ describe("the gate state file", () => {
         calibrationStatePath: path,
         calibrationMode: "off",
       });
-      assert.equal(state.settings.probMin, 0.25);
+      assert.equal(state.forDevice("dev").probMin, 0.25);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -91,8 +92,8 @@ describe("the gate state file", () => {
       };
       writeFileSync(path, "{\"threshold\": 2, \"minFrames\": 0}\n");
       const state = loadGateState(config);
-      assert.equal(state.settings.probMin, 0.5);
-      assert.equal(state.settings.minFrames, 3);
+      assert.equal(state.forDevice("dev").probMin, 0.5);
+      assert.equal(state.forDevice("dev").minFrames, 3);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
