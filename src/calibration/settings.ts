@@ -47,10 +47,15 @@ export function loadGateState(config: GateStateConfig): GateState {
   const stored = readState(path);
   const settings = stored ?? { ...fallback };
   if (stored === null) {
-    writeState(path, fallback);
-    info(
-      `calibration state seeded: ${fallback.probMin} with ${fallback.minFrames} frame(s) in ${path}`
-    );
+    if (writeState(path, fallback)) {
+      info(
+        `calibration state seeded: ${fallback.probMin} with ${fallback.minFrames} frame(s) in ${path}`
+      );
+    } else {
+      warn(
+        `calibration state could not be seeded in ${path}; the configured defaults are in use`
+      );
+    }
   } else {
     info(
       `calibration state: using ${stored.probMin} with ${stored.minFrames} frame(s) from ${path}`
@@ -94,7 +99,7 @@ function readState(path: string): GateSettings | null {
   return null;
 }
 
-function writeState(path: string, settings: GateSettings): void {
+function writeState(path: string, settings: GateSettings): boolean {
   try {
     mkdirSync(dirname(path), { recursive: true });
     const temporary = `${path}.tmp`;
@@ -107,9 +112,11 @@ function writeState(path: string, settings: GateSettings): void {
       )}\n`
     );
     renameSync(temporary, path);
+    return true;
   } catch (error) {
     warn(
       `calibration state could not be written to ${path} (${error instanceof Error ? error.message : String(error)})`
     );
+    return false;
   }
 }
