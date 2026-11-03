@@ -40,13 +40,13 @@ export function loadGateState(config: GateStateConfig): GateState {
     minFrames: config.speechMinFrames,
   };
   const path = config.calibrationStatePath;
-  if (path === "" || config.calibrationMode === "off") {
+  if (path === "") {
     return { settings: { ...fallback }, path: "", apply: () => {} };
   }
 
   const stored = readState(path);
   const settings = stored ?? { ...fallback };
-  if (stored === null) {
+  if (stored === null && config.calibrationMode !== "off") {
     if (writeState(path, fallback)) {
       info(
         `calibration state seeded: ${fallback.probMin} with ${fallback.minFrames} frame(s) in ${path}`
@@ -56,7 +56,7 @@ export function loadGateState(config: GateStateConfig): GateState {
         `calibration state could not be seeded in ${path}; the configured defaults are in use`
       );
     }
-  } else {
+  } else if (stored !== null) {
     info(
       `calibration state: using ${stored.probMin} with ${stored.minFrames} frame(s) from ${path}`
     );

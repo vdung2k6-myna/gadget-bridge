@@ -62,6 +62,23 @@ describe("the gate state file", () => {
     }
   });
 
+  it("uses an applied file even when capture is off", () => {
+    const dir = mkdtempSync(join(tmpdir(), "bridge-state-"));
+    const path = join(dir, "applied.json");
+    try {
+      writeFileSync(path, JSON.stringify({ threshold: 0.25, minFrames: 3 }));
+      const state = loadGateState({
+        speechProbMin: 0.5,
+        speechMinFrames: 3,
+        calibrationStatePath: path,
+        calibrationMode: "off",
+      });
+      assert.equal(state.settings.probMin, 0.25);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("ignores an unusable file and falls back to the configured pair", () => {
     const dir = mkdtempSync(join(tmpdir(), "bridge-state-"));
     const path = join(dir, "applied.json");
