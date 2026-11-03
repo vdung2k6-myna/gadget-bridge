@@ -324,6 +324,16 @@ export function utteranceFrames(
   return { frames: frames.slice(onset), onset };
 }
 
+/** What a closed window's endpointer saw, for the turn that follows it. */
+export interface WindowStats {
+  /** The loudest voiced frame of the window, as `endpointerLog` reports it. */
+  peak: number;
+  /** The gate the window's frames were judged against. */
+  gate: number;
+  /** How much speech the window counted. */
+  speechMs: number;
+}
+
 /** A listening window: the frames, the endpointer over them, and the decoder that
  *  reads them. One per turn, opened on `listen start` and re-opened at every
  *  decision, since the state that decided must not decide again. */
@@ -344,6 +354,12 @@ export interface Listening {
   /** The utterance as the file the platform is handed, or nothing when no frame in
    *  it decoded. */
   upload(): { wav: Buffer | null; seconds: number; failed: number };
+  /**
+   * The evidence the window closed on. Read before `open()` resets it, and carried
+   * to the turn, which decides what the transcript is worth: a window that barely
+   * cleared its gate and produced a word or two is noise the transcriber named.
+   */
+  stats(): WindowStats;
   /** Release the decoder. */
   close(): void;
 }
@@ -413,6 +429,10 @@ export function createListening(
 
     utterance(): { frames: ListeningFrame[]; onset: number } {
       return utteranceFrames(frames, config);
+    },
+
+    stats(): WindowStats {
+      return { peak: vad.peak, gate: vad.gate, speechMs: vad.speechMs };
     },
 
     upload(): { wav: Buffer | null; seconds: number; failed: number } {

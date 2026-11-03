@@ -184,6 +184,13 @@ export interface BridgeConfig {
   vadMinSpeechMs: number;
   /** The sliding window speech is counted over. */
   vadSpeechWindowMs: number;
+  /**
+   * How far above its gate a window's peak must be for a short transcript to be a
+   * turn. Below it, a word or two is taken as the transcriber naming noise.
+   */
+  marginalPeakRatio: number;
+  /** The longest transcript a marginal window may carry and still be answered. */
+  marginalMaxWords: number;
   /** The longest turn, as a backstop for a person who never stops. */
   maxTurnMs: number;
   /** How long a window may hold no speech at all before it is given up on. */
@@ -401,6 +408,11 @@ export const ENDPOINTER_DEFAULTS = {
    *  is not — `480 >= 480` still closes a turn. */
   vadMinSpeechMs: 500,
   vadSpeechWindowMs: 3000,
+  /** The measured separation on the pilot boards (2026-11-03): noise windows peaked
+   *  1.05-1.30x their gate, speech 1.8-4.0x. 1.3 sits above the noise and below every
+   *  speech window. */
+  marginalPeakRatio: 1.3,
+  marginalMaxWords: 2,
   maxTurnMs: 20000,
   vadNoSpeechMs: 15000,
   drainGuardMs: 400,
@@ -428,6 +440,26 @@ function requireEndpointer(config: {
       `BRIDGE_VAD_SPEECH_WINDOW_MS must exceed BRIDGE_VAD_SILENCE_MS + BRIDGE_VAD_MIN_SPEECH_MS ` +
         `(${config.vadSilenceMs} + ${config.vadMinSpeechMs}), got ${config.vadSpeechWindowMs}: ` +
         `speech ages out of the window before the silence threshold is reached, and no turn could ever close`
+    );
+  }
+}
+
+/**
+ * The marginal-window rule: a ratio at or below 1 makes every window marginal, and a
+ * word cap below 1 means no transcript could ever be short enough; either one would
+ * silently stop the bridge answering. Both are checked at start rather than left to a
+ * typo.
+ */
+function requireMarginalRule(config: { marginalPeakRatio: number; marginalMaxWords: number }): void {
+  if (!(config.marginalPeakRatio > 1)) {
+    throw new Error(
+      `BRIDGE_MARGINAL_PEAK_RATIO must be greater than 1, got ${config.marginalPeakRatio}: ` +
+        `at or below 1 every window is marginal and no turn would be taken`
+    );
+  }
+  if (!Number.isInteger(config.marginalMaxWords) || config.marginalMaxWords < 1) {
+    throw new Error(
+      `BRIDGE_MARGINAL_MAX_WORDS must be a positive integer, got ${config.marginalMaxWords}`
     );
   }
 }
@@ -560,12 +592,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
     vadSilenceMs: readInt(env, "BRIDGE_VAD_SILENCE_MS", ENDPOINTER_DEFAULTS.vadSilenceMs),
     vadMinSpeechMs: readInt(env, "BRIDGE_VAD_MIN_SPEECH_MS", ENDPOINTER_DEFAULTS.vadMinSpeechMs),
     vadSpeechWindowMs: readInt(env, "BRIDGE_VAD_SPEECH_WINDOW_MS", ENDPOINTER_DEFAULTS.vadSpeechWindowMs),
+    marginalPeakRatio: readNumber(env, "BRIDGE_MARGINAL_PEAK_RATIO", ENDPOINTER_DEFAULTS.marginalPeakRatio),
+    marginalMaxWords: readInt(env, "BRIDGE_MARGINAL_MAX_WORDS", ENDPOINTER_DEFAULTS.marginalMaxWords),
     maxTurnMs: readInt(env, "BRIDGE_MAX_TURN_MS", ENDPOINTER_DEFAULTS.maxTurnMs),
     vadNoSpeechMs: readInt(env, "BRIDGE_VAD_NO_SPEECH_MS", ENDPOINTER_DEFAULTS.vadNoSpeechMs),
     drainGuardMs: readInt(env, "BRIDGE_DRAIN_GUARD_MS", ENDPOINTER_DEFAULTS.drainGuardMs),
     onsetLeadMs: readInt(env, "BRIDGE_ONSET_LEAD_MS", ENDPOINTER_DEFAULTS.onsetLeadMs),
   };
   requireEndpointer(endpointer);
+  requireMarginalRule(endpointer);
 
   return {
     otaPort: readInt(env, "OTA_PORT", 8003, PORT_MAX),

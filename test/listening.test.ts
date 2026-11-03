@@ -165,6 +165,32 @@ describe("the endpointer, over frames", () => {
     assert.equal(closed, "turn", "sustained silence after speech is what closes a turn");
   });
 
+  it("reports the evidence its verdict was made on, for the turn that follows", () => {
+    let now = 0;
+    const listening = createListening(config, () => now);
+    listening.open();
+
+    for (let i = 0; i < 10; i++) {
+      now += FRAME_MS;
+      listening.frame(speechFrame);
+    }
+    let closed: string = "wait";
+    for (let i = 0; i < FRAMES(ENDPOINTER_DEFAULTS.vadSilenceMs); i++) {
+      now += FRAME_MS;
+      closed = listening.frame(roomFrame);
+    }
+    assert.equal(closed, "turn");
+
+    const stats = listening.stats();
+    assert.equal(stats.speechMs, 600, "ten 60 ms frames were counted as speech");
+    assert.ok(stats.peak > 0);
+    assert.ok(stats.gate > 0);
+    assert.ok(
+      stats.peak >= stats.gate,
+      "the window that closed a turn cleared the gate it was judged against"
+    );
+  });
+
   it("does not cut a person off at a pause inside a sentence", () => {
     // A pause is shorter than the silence threshold, so the turn stays open and the
     // utterance is carried whole. This is the difference between an endpointer and a

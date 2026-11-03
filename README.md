@@ -268,6 +268,15 @@ that is carried — the stretch the person actually filled. A window in which no
 can be located at all is not sent: a slice guessed at the window's length is how a
 transcription comes back with words nobody said.
 
+A window that only just cleared its gate is not trusted by itself. When the platform's
+transcription is no longer than `BRIDGE_MARGINAL_MAX_WORDS` (default 2) and the window's
+peak was below `BRIDGE_MARGINAL_PEAK_RATIO` times its gate (default 1.3), the turn is
+dropped before anything is spoken or shown, and the log names the peak, the gate and the
+text. Measured on the pilot boards (2026-11-03): noise peaked 1.05–1.30× its gate and came
+back as `đi` or `điều kiện`, while speech peaked 1.8–4.0×. A longer transcript is answered
+even from a marginal window, and a short answer that cleared the ratio is answered as
+before.
+
 A session nobody speaks into ends after `BRIDGE_SESSION_IDLE_MS`, measured by what
 a person was behind and by what the bridge still has to play — not by the bytes
 arriving, because a gadget streams whether or not anyone is speaking. Ending a

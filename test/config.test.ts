@@ -166,3 +166,37 @@ describe("the settings the console replaced", () => {
     assert.equal(config.consoleUrl, CONSOLE);
   });
 });
+
+describe("the marginal-window rule", () => {
+  it("defaults to the separation measured on the boards", () => {
+    const config = loadConfig(minimal);
+    assert.equal(config.marginalPeakRatio, 1.3);
+    assert.equal(config.marginalMaxWords, 2);
+  });
+
+  it("refuses a ratio at or below 1, which would call every window marginal", () => {
+    assert.throws(
+      () => loadConfig(withEnv({ BRIDGE_MARGINAL_PEAK_RATIO: "1" })),
+      /must be greater than 1/
+    );
+    assert.throws(
+      () => loadConfig(withEnv({ BRIDGE_MARGINAL_PEAK_RATIO: "0.9" })),
+      /must be greater than 1/
+    );
+  });
+
+  it("refuses a word cap below one", () => {
+    assert.throws(
+      () => loadConfig(withEnv({ BRIDGE_MARGINAL_MAX_WORDS: "0" })),
+      /positive integer/
+    );
+  });
+
+  it("reads both from the environment", () => {
+    const config = loadConfig(
+      withEnv({ BRIDGE_MARGINAL_PEAK_RATIO: "1.6", BRIDGE_MARGINAL_MAX_WORDS: "3" })
+    );
+    assert.equal(config.marginalPeakRatio, 1.6);
+    assert.equal(config.marginalMaxWords, 3);
+  });
+});

@@ -8,7 +8,8 @@ import type { Track } from "../music.js";
 import { takeTurn, type Conversations } from "../conversation.js";
 import { authorizeDevice, describeDenial } from "../credentials.js";
 import { createGadget, type CommandOutcome } from "../gadget.js";
-import { createListening } from "../listening.js";
+import { createListening, type WindowStats } from "../listening.js";
+import { windowVerdict } from "../marginal.js";
 import { err, info, log, runWithDevice, section, warn } from "../log.js";
 import { metrics } from "../metrics.js";
 import type { Gadget, Registry } from "../registry.js";
@@ -492,7 +493,10 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
       return playTrack(speaker, track, config.musicGainDb);
     }
 
-    async function serveTurn(upload: { wav: Buffer | null; seconds: number; failed: number }): Promise<void> {
+    async function serveTurn(
+      upload: { wav: Buffer | null; seconds: number; failed: number },
+      windowStats: WindowStats
+    ): Promise<void> {
       if (!upload.wav) {
         // Every frame in the utterance failed to decode, so there is no audio to send
         // and nothing to transcribe. A turn is not sent, and the device is still able
@@ -648,8 +652,26 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
           },
           {
             onUser: async (said) => {
-              session.heard += 1;
               info(`platform transcribed the turn as ${JSON.stringify(said)}`);
+
+              // A window that only just cleared its gate and came back as a word or
+              // two is the transcriber naming room noise, not a person taking a turn.
+              // Dropped before the display is told and before a command is matched, and
+              // with the reply aborted exactly where a command aborts it. Both halves
+              // are required: a loud room can produce a long noise phrase, and a quiet
+              // person can say one word.
+              const verdict = windowVerdict(windowStats, said, config);
+              if (verdict.marginal) {
+                info(
+                  `dropped a marginal window: peak ${Math.round(windowStats.peak)}, ` +
+                    `gate ${Math.round(windowStats.gate)} (${verdict.ratio.toFixed(2)}x), ` +
+                    `${JSON.stringify(said)} (${verdict.words} word(s)) — not a turn`
+                );
+                controller.abort();
+                return;
+              }
+
+              session.heard += 1;
               // What the device's display shows before the reply is heard (6.2). Taken
               // from the stream's own transcription rather than from a second one here,
               // because the platform is the thing that decodes the utterance (D12) and a
@@ -1113,10 +1135,11 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
           // microphone stays open, which the rig measured in run 4. Nothing async may
           // happen between the verdict and the clear, or a frame that arrives in
           // between would decide the same turn a second time (6.4).
+          const windowStats = listening.stats();
           const upload = listening.upload();
           listening.open();
           session.listening = false;
-          void serveTurn(upload);
+          void serveTurn(upload, windowStats);
         } else if (verdict === "giveup") {
           // Nobody spoke into this window. No turn, and a fresh window so the person
           // who has not spoken yet still can (6.3, 6.4).

@@ -270,6 +270,10 @@ function configFor(platformUrl: string, overrides: Partial<BridgeConfig> = {}): 
     serverRate: 24000,
     frameMs: FRAME_MS,
     ...ENDPOINTER_DEFAULTS,
+    // This harness's synthetic voice peaks at 1.06x its gate, which the marginal-window
+    // rule would take for noise and drop every turn here. The rule itself is covered in
+    // marginal.test.ts; this file is about the turn path.
+    marginalPeakRatio: 1,
     sessionIdleMs: 60000,
     musicDir: "",
     musicGainDb: MUSIC_GAIN_DB_DEFAULT,
@@ -491,6 +495,44 @@ describe("a person speaks to the gadget", () => {
       assert.ok(seconds < 3.0, `${seconds}s was uploaded out of a 3.84s window`);
       assert.match(platform.requests[0]!.body.toString("latin1"), /filename="turn\.wav"/);
     } finally {
+      device.stop();
+      platform.stop();
+    }
+  });
+
+  it("does not take a turn from a window that only just cleared the gate", async () => {
+    // This file's synthetic voice peaks at 1.06x its gate, which is the shape of the
+    // noise windows the pilot logged. With the rule switched on for this test, the
+    // transcript comes back and the bridge drops it before the display or the speaker
+    // sees anything — and it says so, with the evidence, in the log.
+    const logged: string[] = [];
+    const original = console.log;
+    console.log = (...args: unknown[]): void => void logged.push(args.map(String).join(" "));
+    const platform = await stubPlatform((res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(sse("user", { text: "xin chao" }));
+      res.write(sse("done", { fullText: "" }));
+      res.end();
+    });
+    const device = await spokenDevice(configFor(platform.url, { marginalPeakRatio: 1.3 }));
+    try {
+      device.send({ type: "hello", version: 3, transport: "websocket" });
+      await device.until(() => device.messages.some((m) => m.includes('"hello"')), "the server hello");
+
+      device.send({ type: "listen", state: "start", mode: "manual" });
+      device.speak();
+
+      await device.until(() => platform.requests.length === 1, "the turn to reach the platform");
+      await device.until(
+        () => logged.some((line) => line.includes("dropped a marginal window")),
+        "the marginal window to be logged"
+      );
+
+      const typed = device.messages.map((m) => JSON.parse(m) as Record<string, unknown>);
+      assert.equal(typed.filter((m) => m.type === "stt").length, 0, "nothing is shown for a noise window");
+      assert.equal(typed.filter((m) => m.type === "tts").length, 0, "and nothing is spoken");
+    } finally {
+      console.log = original;
       device.stop();
       platform.stop();
     }
