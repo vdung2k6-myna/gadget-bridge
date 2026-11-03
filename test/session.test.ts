@@ -95,7 +95,8 @@ describe("the spoken session", () => {
       capture,
       minFrames: 3,
       quietMs: 5,
-      sampleWindowMs: 50,
+      phaseMs: 50,
+      answerMs: 50,
       speak: async (text) => {
         spoken.push(text);
       },
@@ -137,7 +138,8 @@ describe("the spoken session", () => {
       capture,
       minFrames: 3,
       quietMs: 5,
-      sampleWindowMs: 50,
+      phaseMs: 50,
+      answerMs: 50,
       speak: async (text) => {
         spoken.push(text);
       },
@@ -175,7 +177,8 @@ describe("the spoken session", () => {
       capture,
       minFrames: 3,
       quietMs: 5,
-      sampleWindowMs: 20,
+      phaseMs: 20,
+      answerMs: 20,
       speak: async (text) => {
         spoken.push(text);
       },
@@ -209,7 +212,8 @@ describe("the spoken session", () => {
       capture,
       minFrames: 3,
       quietMs: 5,
-      sampleWindowMs: 20,
+      phaseMs: 20,
+      answerMs: 20,
       speak: async () => {},
       transcribe: async () => null,
       apply: () => assert.fail("nothing should be applied"),
