@@ -30,15 +30,16 @@ const PHASES: ReadonlyArray<{ name: PhaseName; label: string; expect: PhaseExpec
 ];
 
 /**
- * The quiet phase's fixed wait, and how long a speech phase collects windows before
- * choosing one. Collection starts only after the instruction has finished playing (the
+ * The quiet phase's fixed wait, how long a speech phase collects windows before
+ * choosing one, and how long the yes/no answer is awaited — twenty seconds because the
+ * answer starts after the question has finished playing and a short reply can come late. Collection starts only after the instruction has finished playing (the
  * caller waits it out), so the person has this long to answer; the room closes windows
  * of its own, so the phase keeps the one its own gate likes best.
  */
 const QUIET_MS = 60_000;
 /** How long a speech phase keeps listening, and how long the yes/no answer is awaited. */
 const PHASE_MS = 60_000;
-const ANSWER_MS = 10_000;
+const ANSWER_MS = 20_000;
 
 /** A window below this probability is room, not a sample, even if it is the best heard. */
 const SCORE_FLOOR = 0.2;
