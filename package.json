@@ -13,13 +13,16 @@
     "dev": "tsx watch src/index.ts",
     "test": "tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "load-test": "tsx scripts/load-test.ts"
+    "load-test": "tsx scripts/load-test.ts",
+    "mcp:calibrate": "tsx src/calibration/mcp.ts"
   },
   "dependencies": {
     "@evan/opus": "^1.0.3",
+    "@modelcontextprotocol/sdk": "1.32.2",
     "mpg123-decoder": "^1.0.3",
     "onnxruntime-web": "1.30.0",
-    "ws": "^8.22.0"
+    "ws": "^8.22.0",
+    "zod": "3.25.76"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

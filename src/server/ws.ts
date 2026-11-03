@@ -19,6 +19,7 @@ import {
 } from "../speech-gate.js";
 import { err, info, log, runWithDevice, section, warn } from "../log.js";
 import { metrics } from "../metrics.js";
+import type { CapturedWindow, Capture } from "../calibration/capture.js";
 import type { Gadget, Registry } from "../registry.js";
 import { advertisesTools } from "../protocol/mcp.js";
 import { isAbort, isHello, isListen, isMcp, parseClientMessage, serverHello } from "../protocol/messages.js";
@@ -112,6 +113,11 @@ export interface WsServices {
    * model; null is a gate that is unavailable, and every turn passes through it.
    */
   speechGate?: SpeechGate | null;
+  /**
+   * Calibration capture, when the deployment names a directory. Undefined is a
+   * deployment that captures nothing, which is every ordinary one.
+   */
+  capture?: Capture | null;
 }
 
 export function createWsServer(config: BridgeConfig, services: WsServices): WebSocketServer {
@@ -536,10 +542,12 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
       upload: { wav: Buffer | null; seconds: number; failed: number },
       windowStats: WindowStats
     ): Promise<void> {
+      const capture = services.capture ?? null;
+      let captured: CapturedWindow | null = null;
       if (upload.wav) {
         const gate = services.speechGate === undefined ? await speechGate() : services.speechGate;
+        let score: SpeechScore | null = null;
         if (gate !== null) {
-          let score: SpeechScore | null = null;
           try {
             score = await gate.score(samplesOf(parseWavAudio(upload.wav).pcm), config.speechProbMin);
           } catch (error) {
@@ -551,23 +559,46 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
               );
             }
           }
-          if (score !== null && score.strong < config.speechMinFrames) {
-            info(
-              `dropped a window with no speech: ${score.strong}/${score.frames} frame(s) ` +
-                `at or above ${config.speechProbMin} over ${upload.seconds.toFixed(2)}s ` +
-                `(peak ${score.max.toFixed(3)}) — not a turn`
-            );
-            reopenWindow();
-            return;
-          }
         }
+
+        // Written before the decision, so a dropped window keeps the evidence it was
+        // dropped on — which is the population a threshold is calibrated from.
+        const evidence = {
+          sessionId: session.id,
+          wav: upload.wav,
+          seconds: upload.seconds,
+          window: windowStats,
+          gate:
+            score === null
+              ? null
+              : {
+                  threshold: config.speechProbMin,
+                  strong: score.strong,
+                  frames: score.frames,
+                  max: score.max,
+                },
+        };
+
+        if (score !== null && score.strong < config.speechMinFrames) {
+          capture?.record({ ...evidence, decision: "dropped" });
+          info(
+            `dropped a window with no speech: ${score.strong}/${score.frames} frame(s) ` +
+              `at or above ${config.speechProbMin} over ${upload.seconds.toFixed(2)}s ` +
+              `(peak ${score.max.toFixed(3)}) — not a turn`
+          );
+          reopenWindow();
+          return;
+        }
+
+        captured = capture?.record({ ...evidence, decision: "sent" }) ?? null;
       }
-      await serveTurn(upload, windowStats);
+      await serveTurn(upload, windowStats, captured);
     }
 
     async function serveTurn(
       upload: { wav: Buffer | null; seconds: number; failed: number },
-      windowStats: WindowStats
+      windowStats: WindowStats,
+      captured: CapturedWindow | null
     ): Promise<void> {
       if (!upload.wav) {
         // Every frame in the utterance failed to decode, so there is no audio to send
@@ -726,6 +757,11 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
           {
             onUser: async (said) => {
               info(`platform transcribed the turn as ${JSON.stringify(said)}`);
+              // The sidecar's last piece: what the platform heard in the window the
+              // gate sent. Recorded before the marginal rule, because a window that
+              // transcribes to a word or two is exactly what a calibration compares
+              // against the room's silence.
+              captured?.setTranscript(said);
 
               // A window that only just cleared its gate and came back as a word or
               // two is the transcriber naming room noise, not a person taking a turn.

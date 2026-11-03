@@ -1,7 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { createConnection } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -11,6 +14,7 @@ import { ENDPOINTER_DEFAULTS, MUSIC_GAIN_DB_DEFAULT, type BridgeConfig } from ".
 import type { RuntimeLlm, RuntimeProvider, TurnLanguage } from "../src/turn.js";
 import { createConversations } from "../src/conversation.js";
 import { deriveToken, normalizeDeviceId } from "../src/credentials.js";
+import { createCapture } from "../src/calibration/capture.js";
 import type { Gadget, Registry } from "../src/registry.js";
 import type { SpeechGate } from "../src/speech-gate.js";
 import { createWsServer } from "../src/server/ws.js";
@@ -281,6 +285,7 @@ function configFor(platformUrl: string, overrides: Partial<BridgeConfig> = {}): 
     sessionIdleMs: 60000,
     musicDir: "",
     musicGainDb: MUSIC_GAIN_DB_DEFAULT,
+    calibrationDir: "",
     historyTurns: 20,
     commandStep: 10,
     handoverMs: 400,
@@ -341,6 +346,22 @@ async function startedServer(
       wss.close();
     },
   };
+}
+
+/** A sidecar as the capture wrote it, for the assertions that read one back. */
+interface CapturedSidecar {
+  decision: string;
+  transcript: string | null;
+  gate: { strong: number } | null;
+}
+
+/** Poll a filesystem effect; the bridge writes it synchronously off the message handler. */
+async function waitFor(predicate: () => boolean, what: string, ms = 2_000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
 }
 
 /** One gadget's socket, on a bridge already listening, as the gadget at `deviceId`.
@@ -630,6 +651,114 @@ describe("a person speaks to the gadget", () => {
     } finally {
       device.stop();
       platform.stop();
+    }
+  });
+
+  it("captures a dropped window and a sent one, with the transcript on the sent one", async () => {
+    const platform = await stubPlatform((res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(sse("user", { text: "xin chao" }));
+      res.write(sse("done", { fullText: "" }));
+      res.end();
+    });
+    let scored = 0;
+    const gate: SpeechGate = {
+      async score() {
+        scored += 1;
+        return scored === 1
+          ? { max: 0.01, mean: 0.005, frames: 10, strong: 0 }
+          : { max: 0.99, mean: 0.9, frames: 10, strong: 10 };
+      },
+    };
+    const dir = mkdtempSync(join(tmpdir(), "bridge-capture-turn-"));
+    const config = configFor(platform.url, { marginalPeakRatio: 1 });
+    const services: BridgeServices = {
+      registry: registryFor(config),
+      conversations: createConversations(config),
+      speechGate: gate,
+      capture: createCapture(dir),
+    };
+    const device = await spokenDevice(config, services);
+    try {
+      device.send({ type: "hello", version: 3, transport: "websocket" });
+      await device.until(() => device.messages.some((m) => m.includes('"hello"')), "the server hello");
+      device.send({ type: "listen", state: "start", mode: "manual" });
+
+      device.speak();
+      await waitFor(
+        () => readdirSync(dir).some((name) => name.endsWith("-dropped.json")),
+        "the dropped window to be captured"
+      );
+
+      device.speak();
+      await device.until(() => platform.requests.length === 1, "the sent window to reach the platform");
+      await waitFor(
+        () =>
+          readdirSync(dir).some((name) => {
+            if (!name.endsWith("-sent.json")) return false;
+            const sidecar = JSON.parse(readFileSync(join(dir, name), "utf8")) as {
+              transcript?: string | null;
+            };
+            return sidecar.transcript !== null;
+          }),
+        "the sent window's transcript"
+      );
+
+      const droppedName = readdirSync(dir).find((name) => name.endsWith("-dropped.json"))!;
+      const dropped = JSON.parse(readFileSync(join(dir, droppedName), "utf8")) as unknown as CapturedSidecar;
+      assert.equal(dropped.decision, "dropped");
+      assert.equal(dropped.transcript, null);
+      assert.equal(dropped.gate?.strong, 0);
+
+      const sentName = readdirSync(dir).find((name) => name.endsWith("-sent.json"))!;
+      const sent = JSON.parse(readFileSync(join(dir, sentName), "utf8")) as unknown as CapturedSidecar;
+      assert.equal(sent.decision, "sent");
+      assert.equal(sent.transcript, "xin chao");
+      assert.equal(sent.gate?.strong, 10);
+    } finally {
+      device.stop();
+      platform.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("serves the turn when calibration capture cannot write", async () => {
+    const platform = await stubPlatform((res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(sse("user", { text: "xin chao" }));
+      res.write(sse("done", { fullText: "" }));
+      res.end();
+    });
+    const dir = mkdtempSync(join(tmpdir(), "bridge-capture-broken-"));
+    const capture = createCapture(dir);
+    assert.ok(capture !== null);
+    chmodSync(dir, 0o500);
+    const config = configFor(platform.url, { marginalPeakRatio: 1 });
+    const services: BridgeServices = {
+      registry: registryFor(config),
+      conversations: createConversations(config),
+      speechGate: {
+        async score() {
+          return { max: 0.99, mean: 0.9, frames: 10, strong: 10 };
+        },
+      },
+      capture,
+    };
+    const device = await spokenDevice(config, services);
+    try {
+      device.send({ type: "hello", version: 3, transport: "websocket" });
+      await device.until(() => device.messages.some((m) => m.includes('"hello"')), "the server hello");
+      device.send({ type: "listen", state: "start", mode: "manual" });
+      device.speak();
+      await device.until(
+        () => platform.requests.length === 1,
+        "the turn to reach the platform despite the capture failure"
+      );
+    } finally {
+      device.stop();
+      platform.stop();
+      chmodSync(dir, 0o700);
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 

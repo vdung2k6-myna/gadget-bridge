@@ -1,3 +1,5 @@
+import { isAbsolute } from "node:path";
+
 import { normalizeDeviceId } from "./credentials.js";
 import { localIp } from "./net/local-ip.js";
 import type { FramingVersion } from "./protocol/framing.js";
@@ -155,6 +157,22 @@ export interface BridgeConfig {
    */
   musicGainDb: number;
   /**
+   * Where the bridge writes the windows it judges, for calibration. Read from
+   * `BRIDGE_CALIBRATION_DIR`; empty means capture is off, which is every ordinary
+   * deployment.
+   *
+   * A window is written as a WAV and a sidecar holding the evidence the decision was
+   * made on — the endpointer's levels, the speech gate's score, whether it was sent,
+   * and the transcript when there is one — so a threshold can be chosen from what the
+   * room actually produced instead of from a guess. The directory holds the person's
+   * speech and is for a calibration session, not for a deployment to leave on.
+   *
+   * Absolute rather than relative: a relative path resolves against whichever working
+   * directory the unit happened to start in, and a capture written somewhere nobody
+   * expected is worse than a refused start.
+   */
+  calibrationDir: string;
+  /**
    * The rate the **device** encodes its uplink at, in Hz. Read from
    * `BRIDGE_DEVICE_RATE`; the firmware's own declaration is 16000.
    *
@@ -306,6 +324,24 @@ function readMusicGainDb(env: NodeJS.ProcessEnv): number {
  * is about clipping, since two of the three tracks measured peaked at 0.0 dBFS.
  */
 export const MUSIC_GAIN_DB_DEFAULT = -10;
+
+/**
+ * Where calibration windows are written, or empty for no capture.
+ *
+ * Refused rather than resolved when it is relative: the unit's working directory is the
+ * release the bridge happens to be serving, so `./capture` would silently move with each
+ * deploy, and empty is a perfectly good way to say "off".
+ */
+function readCalibrationDir(env: NodeJS.ProcessEnv): string {
+  const value = (env.BRIDGE_CALIBRATION_DIR ?? "").trim();
+  if (value !== "" && !isAbsolute(value)) {
+    throw new Error(
+      `BRIDGE_CALIBRATION_DIR must be an absolute path, got ${JSON.stringify(value)}: ` +
+        `a relative capture directory moves with the working directory`
+    );
+  }
+  return value;
+}
 
 /**
  * The secret is the only value with no default. A default here would be a
@@ -668,6 +704,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
     // non-empty default would point every bridge at a directory that is not there on any of them.
     musicDir: (env.BRIDGE_MUSIC_DIR ?? "").trim(),
     musicGainDb: readMusicGainDb(env),
+    calibrationDir: readCalibrationDir(env),
     ...endpointer,
   };
 }

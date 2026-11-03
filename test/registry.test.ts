@@ -27,6 +27,7 @@ function configFor(overrides: Partial<BridgeConfig> = {}): BridgeConfig {
     sessionIdleMs: 60000,
     musicDir: "",
     musicGainDb: MUSIC_GAIN_DB_DEFAULT,
+    calibrationDir: "",
     historyTurns: 20,
     commandStep: 10,
     handoverMs: 400,

@@ -122,6 +122,22 @@ describe("the rest of the configuration", () => {
     );
   });
 
+  it("leaves calibration capture off unless a directory is named", () => {
+    assert.equal(loadConfig(minimal).calibrationDir, "");
+    assert.equal(loadConfig(withEnv({ BRIDGE_CALIBRATION_DIR: "  " })).calibrationDir, "");
+  });
+
+  it("takes an absolute calibration directory and refuses a relative one", () => {
+    assert.equal(
+      loadConfig(withEnv({ BRIDGE_CALIBRATION_DIR: "/var/lib/bridge-calibration" })).calibrationDir,
+      "/var/lib/bridge-calibration"
+    );
+    assert.throws(
+      () => loadConfig(withEnv({ BRIDGE_CALIBRATION_DIR: "./capture" })),
+      /BRIDGE_CALIBRATION_DIR must be an absolute path/
+    );
+  });
+
   it("reads the session window, where nought is a value and not a mistake", () => {
     assert.equal(loadConfig(withEnv({ BRIDGE_SESSION_IDLE_MS: "0" })).sessionIdleMs, 0);
   });

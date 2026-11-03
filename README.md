@@ -286,6 +286,40 @@ loud click or a door is one or two frames; a word is several. Measured on the pi
 frames, the peak and the duration. If the model cannot be loaded or its checksum does not
 match, the bridge warns once and passes turns through.
 
+### Calibrating the speech gate on a board
+
+The threshold is a measurement of the room, the microphone and the voice, not a constant.
+`BRIDGE_CALIBRATION_DIR` names an absolute directory; when it is set, the bridge writes every
+window it judges there as a WAV and a JSON sidecar — the endpointer's peak, gate and speech
+length, the gate's threshold, qualifying frames and peak probability, whether the window was
+sent, and the transcript when the platform produced one. Unset, nothing is written. The
+directory holds the person's speech: it is for a calibration session and is deleted afterwards.
+
+The calibration runs as an MCP server (`npm run mcp:calibrate`) that an LLM drives. A phase
+brackets what the person is asked to do — `calibration_phase_start` with a label and whether
+speech is expected, `calibration_phase_end` when they confirm — and windows belong to the phase
+their capture time falls in. `calibration_list`, `calibration_score` and `calibration_report`
+then read the capture: the report compares the phases' expectations and recommends the lowest
+threshold that admits every speech window and refuses every silence window, with its margin;
+where none does, it says the capture does not separate and names the overlap. The server also
+offers a `calibration_session` prompt with the whole procedure — quiet room, normal sentence,
+louder, soft, one word — including the reminder that the gadget may not reply during a
+calibration and that the operator should take their time.
+
+```json
+{
+  "mcpServers": {
+    "bridge-calibration": {
+      "command": "npm",
+      "args": ["--prefix", "/srv/gadget-bridge/current", "run", "mcp:calibrate"]
+    }
+  }
+}
+```
+
+The tools never change the bridge: applying `BRIDGE_SPEECH_PROB_MIN` and
+`BRIDGE_SPEECH_MIN_FRAMES` is the operator's step.
+
 A session nobody speaks into ends after `BRIDGE_SESSION_IDLE_MS`, measured by what
 a person was behind and by what the bridge still has to play — not by the bytes
 arriving, because a gadget streams whether or not anyone is speaking. Ending a

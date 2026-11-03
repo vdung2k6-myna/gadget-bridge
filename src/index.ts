@@ -1,3 +1,4 @@
+import { createCapture } from "./calibration/capture.js";
 import { loadConfig } from "./config.js";
 import { createConversations } from "./conversation.js";
 import { log, warn } from "./log.js";
@@ -33,9 +34,12 @@ const config = loadConfig();
 
 const registry = createRegistry(config);
 const conversations = createConversations(config);
+// Null unless the deployment names a directory: capture is a calibration session's
+// switch, and an ordinary bridge writes no window anywhere.
+const capture = createCapture(config.calibrationDir);
 
 createOtaServer(config, registry);
-createWsServer(config, { registry, conversations });
+createWsServer(config, { registry, conversations, capture });
 if (config.metricsPort !== null && config.metricsPort !== undefined) createMetricsServer(config);
 
 const wsUrl = `ws://${config.publicHost}:${config.wsPort}/xiaozhi/v1/`;
