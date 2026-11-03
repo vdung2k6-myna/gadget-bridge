@@ -130,9 +130,10 @@ describe("the rest of the configuration", () => {
   it("starts capture by itself unless the mode says a person arms it", () => {
     assert.equal(loadConfig(minimal).calibrationMode, "off");
     assert.equal(loadConfig(withEnv({ BRIDGE_CALIBRATION_MODE: "arm" })).calibrationMode, "arm");
+    assert.equal(loadConfig(withEnv({ BRIDGE_CALIBRATION_MODE: "spoken" })).calibrationMode, "spoken");
     assert.throws(
       () => loadConfig(withEnv({ BRIDGE_CALIBRATION_MODE: "always" })),
-      /BRIDGE_CALIBRATION_MODE must be "off" or "arm"/
+      /BRIDGE_CALIBRATION_MODE must be "off", "arm" or "spoken"/
     );
   });
 

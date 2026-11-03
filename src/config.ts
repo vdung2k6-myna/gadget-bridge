@@ -1,4 +1,4 @@
-import { isAbsolute } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 
 import { normalizeDeviceId } from "./credentials.js";
 import { localIp } from "./net/local-ip.js";
@@ -180,9 +180,16 @@ export interface BridgeConfig {
    * gadget, for a bounded session — a board in a room where the operator is not, and a
    * directory that is not written to unless someone at the board asked for it.
    */
-  calibrationMode: "off" | "arm";
+  calibrationMode: "off" | "arm" | "spoken";
   /** How long an armed capture lasts, from `BRIDGE_CALIBRATION_SESSION_MS`. */
   calibrationSessionMs: number;
+  /**
+   * The file the applied calibration values live in, from
+   * `BRIDGE_CALIBRATION_STATE`. Seeded with the configured defaults the first time
+   * calibration runs, so the value in use is always recorded; deleting it restores
+   * the environment's values. Empty when there is no calibration directory.
+   */
+  calibrationStatePath: string;
   /**
    * The rate the **device** encodes its uplink at, in Hz. Read from
    * `BRIDGE_DEVICE_RATE`; the firmware's own declaration is 16000.
@@ -359,13 +366,29 @@ function readCalibrationDir(env: NodeJS.ProcessEnv): string {
  * command arms it for a session). Anything else is a deployment that believed it had a
  * mode it does not have, and is refused rather than defaulted.
  */
-function readCalibrationMode(env: NodeJS.ProcessEnv): "off" | "arm" {
+function readCalibrationMode(env: NodeJS.ProcessEnv): "off" | "arm" | "spoken" {
   const value = (env.BRIDGE_CALIBRATION_MODE ?? "off").trim().toLowerCase();
   if (value === "" || value === "off") return "off";
-  if (value === "arm") return "arm";
+  if (value === "arm" || value === "spoken") return value;
   throw new Error(
-    `BRIDGE_CALIBRATION_MODE must be "off" or "arm", got ${JSON.stringify(value)}`
+    `BRIDGE_CALIBRATION_MODE must be "off", "arm" or "spoken", got ${JSON.stringify(value)}`
   );
+}
+
+/**
+ * The applied-values file, which must be absolute for the same reason the capture
+ * directory is. Absent, it is a sibling of the directory so that deleting the
+ * capture's recordings does not forget what was applied.
+ */
+function readCalibrationState(env: NodeJS.ProcessEnv, dir: string): string {
+  const value = (env.BRIDGE_CALIBRATION_STATE ?? "").trim();
+  if (value === "") {
+    return dir === "" ? "" : join(dirname(dir), "bridge-calibration-applied.json");
+  }
+  if (!isAbsolute(value)) {
+    throw new Error(`BRIDGE_CALIBRATION_STATE must be an absolute path, got ${JSON.stringify(value)}`);
+  }
+  return value;
 }
 
 /** An armed session's length, which a negative or zero figure would make meaningless. */
@@ -743,6 +766,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
     calibrationDir: readCalibrationDir(env),
     calibrationMode: readCalibrationMode(env),
     calibrationSessionMs,
+    calibrationStatePath: readCalibrationState(env, (env.BRIDGE_CALIBRATION_DIR ?? "").trim()),
     ...endpointer,
   };
 }

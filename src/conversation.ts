@@ -100,6 +100,10 @@ export interface DeviceTurnInput {
   gadgetCondition?: string;
   /** What this turn may be asked to do: the gadget's catalogue and the bridge's own tools. */
   tools?: readonly TurnTool[];
+  /** Whether the runtime should speak the reply. False asks for a transcript only. */
+  speak?: boolean;
+  /** Whether this turn belongs to the conversation and the console's record. */
+  record?: boolean;
 }
 
 export type DeviceTurnResult =
@@ -167,6 +171,7 @@ export async function takeTurn(
       ...(input.audio ? { audio: input.audio } : {}),
       ...(input.text !== undefined ? { text: input.text } : {}),
       ...(input.tools && input.tools.length > 0 ? { tools: input.tools } : {}),
+      ...(input.speak === false ? { speak: false } : {}),
     },
     {
       ...sink,
@@ -192,7 +197,7 @@ export async function takeTurn(
   // model into the history, followed by the silence where its answer should be.
   const answeredByTheBridge =
     replyText === "" && matchCommand(agent.language, userText, { music: config.musicDir !== "" }) !== null;
-  if (!answeredByTheBridge) {
+  if (!answeredByTheBridge && input.record !== false) {
     // An unheard turn is not history the model is asked with: its request would
     // still look pending, and the next turn would act on it again. The console
     // records the turn below either way, so a person can still read what was said.

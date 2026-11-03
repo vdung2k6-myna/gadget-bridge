@@ -102,6 +102,7 @@ function configFor(options: { commandStep?: number } = {}): BridgeConfig {
     calibrationDir: "",
     calibrationMode: "off",
     calibrationSessionMs: 600_000,
+    calibrationStatePath: "",
     historyTurns: 20,
     commandStep: options.commandStep ?? 10,
     handoverMs: 400,

@@ -20,6 +20,9 @@ import {
 import { err, info, log, runWithDevice, section, warn } from "../log.js";
 import { metrics } from "../metrics.js";
 import type { CapturedWindow, Capture } from "../calibration/capture.js";
+import { speakInstruction } from "../calibration/runtime.js";
+import { createSession, type Session } from "../calibration/session.js";
+import type { GateState } from "../calibration/settings.js";
 import type { Gadget, Registry } from "../registry.js";
 import { advertisesTools } from "../protocol/mcp.js";
 import { isAbort, isHello, isListen, isMcp, parseClientMessage, serverHello } from "../protocol/messages.js";
@@ -118,6 +121,11 @@ export interface WsServices {
    * deployment that captures nothing, which is every ordinary one.
    */
   capture?: Capture | null;
+  /**
+   * The speech gate's effective values, when calibration has recorded a pair. Absent
+   * means the configured ones, which is every deployment that never calibrated.
+   */
+  gateSettings?: GateState;
 }
 
 export function createWsServer(config: BridgeConfig, services: WsServices): WebSocketServer {
@@ -459,6 +467,74 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
      * that a request it cannot settle is never a command at all; by the time anything here runs the
      * choice exists, and the decode is the only step that can still fail.
      */
+    let calibrationSession: Session | null = null;
+    let startSessionAfterTurn = false;
+
+    /**
+     * Start the bridge-driven calibration session in this connection.
+     *
+     * It speaks through the runtime in the gadget's own voice, transcribes each sample
+     * with `speak=0` and records nothing, and applies a confirmed measurement. Started
+     * after the command turn has unwound, so the speaker's bracket is free.
+     */
+    function startCalibrationSession(): void {
+      const capture = services.capture ?? null;
+      if (capture === null) {
+        warn("calibration: this deployment has no capture directory");
+        return;
+      }
+      if (calibrationSession !== null && calibrationSession.active()) return;
+
+      const agent = resolved.agent;
+      if (agent === null) {
+        warn("calibration: this gadget has no agent to speak with");
+        return;
+      }
+      const language = agent.language;
+      const runtime = agent.runtime;
+      const tts = agent.providers.tts ?? undefined;
+
+      calibrationSession = createSession({
+        language,
+        dir: config.calibrationDir,
+        capture,
+        minFrames: services.gateSettings?.settings.minFrames ?? config.speechMinFrames,
+        apply: (threshold, minFrames) => services.gateSettings?.apply(threshold, minFrames),
+        notice: (message) => notice(message),
+        speak: async (text) => {
+          const audio = await speakInstruction(runtime, tts, language, text);
+          speaker.beginTurn();
+          speaker.speak({ index: 0, text, audio });
+          speaker.finish();
+        },
+        transcribe: async (wav) => {
+          let said: string | null = null;
+          const result = await takeTurn(
+            config,
+            resolved,
+            services.conversations,
+            services.registry,
+            {
+              audio: { filename: "calibration.wav", contentType: "audio/wav", data: wav },
+              speak: false,
+              record: false,
+            },
+            {
+              onUser: async (text) => {
+                said = text;
+              },
+            }
+          );
+          if (!result.served) {
+            warn(`calibration sample not transcribed: ${result.message}`);
+            return null;
+          }
+          return said;
+        },
+      });
+      calibrationSession.start();
+    }
+
     /** A line on the gadget's display and in the log, for a state the person changed by voice. */
     function notice(message: string): void {
       sendJson({ type: "alert", status: "Notice", message, emotion: "neutral" });
@@ -479,6 +555,12 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
       }
 
       if (action === "arm") {
+        if (config.calibrationMode === "spoken") {
+          startSessionAfterTurn = true;
+          const detail = "a spoken calibration session is starting";
+          notice(detail);
+          return { ok: true, detail };
+        }
         capture.arm(config.calibrationSessionMs);
         const detail = `calibration armed for ${Math.round(config.calibrationSessionMs / 1000)}s`;
         notice(detail);
@@ -581,13 +663,15 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
       windowStats: WindowStats
     ): Promise<void> {
       const capture = services.capture ?? null;
+      const probMin = services.gateSettings?.settings.probMin ?? config.speechProbMin;
+      const minFrames = services.gateSettings?.settings.minFrames ?? config.speechMinFrames;
       let captured: CapturedWindow | null = null;
       if (upload.wav) {
         const gate = services.speechGate === undefined ? await speechGate() : services.speechGate;
         let score: SpeechScore | null = null;
         if (gate !== null) {
           try {
-            score = await gate.score(samplesOf(parseWavAudio(upload.wav).pcm), config.speechProbMin);
+            score = await gate.score(samplesOf(parseWavAudio(upload.wav).pcm), probMin);
           } catch (error) {
             if (!gateScoringFailed) {
               gateScoringFailed = true;
@@ -610,18 +694,18 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
             score === null
               ? null
               : {
-                  threshold: config.speechProbMin,
+                  threshold: probMin,
                   strong: score.strong,
                   frames: score.frames,
                   max: score.max,
                 },
         };
 
-        if (score !== null && score.strong < config.speechMinFrames) {
+        if (score !== null && score.strong < (services.gateSettings?.settings.minFrames ?? config.speechMinFrames)) {
           capture?.record({ ...evidence, decision: "dropped" });
           info(
             `dropped a window with no speech: ${score.strong}/${score.frames} frame(s) ` +
-              `at or above ${config.speechProbMin} over ${upload.seconds.toFixed(2)}s ` +
+              `at or above ${probMin} over ${upload.seconds.toFixed(2)}s ` +
               `(peak ${score.max.toFixed(3)}) — not a turn`
           );
           reopenWindow();
@@ -994,6 +1078,10 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
         // cleared it would be a second one, which is the shape D10 and D13 keep
         // recording.
         speaker.finish();
+        if (startSessionAfterTurn) {
+          startSessionAfterTurn = false;
+          setImmediate(() => startCalibrationSession());
+        }
         // The backstop, armed here rather than where the partner was asked (D5): the deadline is this
         // gadget's own audio, which `finish()` has just set, and the report that would release the
         // partner's turn arrives on *this* socket. A board that never reports — a crash, a socket that
@@ -1297,6 +1385,19 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
           const upload = listening.upload();
           listening.open();
           session.listening = false;
+          if (calibrationSession !== null && calibrationSession.active() && upload.wav !== null) {
+            const captured =
+              services.capture?.record({
+                sessionId: session.id,
+                wav: upload.wav,
+                seconds: upload.seconds,
+                window: windowStats,
+                gate: null,
+                decision: "sent",
+              }) ?? null;
+            calibrationSession.offer(upload.wav, captured);
+            return;
+          }
           void serveIfSpeech(upload, windowStats);
         } else if (verdict === "giveup") {
           // Nobody spoke into this window. No turn, and a fresh window so the person

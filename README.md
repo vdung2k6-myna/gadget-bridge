@@ -303,6 +303,13 @@ calibration" — and then writes for `BRIDGE_CALIBRATION_SESSION_MS` (ten minute
 itself. Both transitions are logged and shown on the gadget's display. The command's own turn is
 not answered: the bridge aborts the platform's reply and carries the command out.
 
+With `BRIDGE_CALIBRATION_MODE=spoken`, the same command starts a session the bridge runs itself:
+the gadget speaks each step in its own voice through the runtime's speech route, takes one sample in
+each phase, and ends by speaking the separating range and the recommended threshold. When there is
+a recommendation it asks "apply it?" and applies on a spoken yes — at once, and in
+`BRIDGE_CALIBRATION_STATE`, which is seeded with the configured defaults the first time calibration
+runs and read at every start. Deleting that file restores the environment's values.
+
 The calibration runs as an MCP server (`npm run mcp:calibrate`) that an LLM drives. A phase
 brackets what the person is asked to do — `calibration_phase_start` with a label and whether
 speech is expected, `calibration_phase_end` when they confirm — and windows belong to the phase

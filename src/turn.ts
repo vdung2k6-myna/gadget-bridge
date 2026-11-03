@@ -129,6 +129,8 @@ export interface TurnRequest {
   history: readonly TurnMessage[];
   /** The model that answers this turn, or absent for the runtime's own. */
   llm?: RuntimeLlm;
+  /** Whether the runtime speaks the reply; false asks for a transcript only. */
+  speak?: boolean;
   /**
    * What this turn may be asked to do, exactly as it was reported: the gadget's own catalogue,
    * and beside it whatever tools the bridge answers for itself. The platform's model decides
@@ -290,8 +292,9 @@ export function turnForm(request: TurnRequest): FormData {
       form.append("llmTemperature", String(request.llm.temperature));
     }
   }
-  // Always spoken. Every turn this bridge sends is one a device is waiting to hear.
-  form.append("speak", "1");
+  // Spoken unless a caller asks otherwise — every ordinary turn is one a device is
+  // waiting to hear; a calibration sample is asked for its transcript alone.
+  form.append("speak", request.speak === false ? "0" : "1");
   if (request.audio) {
     form.append(
       "audio",

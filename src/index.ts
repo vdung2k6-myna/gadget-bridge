@@ -1,4 +1,5 @@
 import { createCapture } from "./calibration/capture.js";
+import { loadGateState } from "./calibration/settings.js";
 import { loadConfig } from "./config.js";
 import { createConversations } from "./conversation.js";
 import { log, warn } from "./log.js";
@@ -37,14 +38,17 @@ const conversations = createConversations(config);
 // Null unless the deployment names a directory: capture is a calibration session's
 // switch, and an ordinary bridge writes no window anywhere.
 const capture = createCapture(config.calibrationDir, {
-  // `arm` mode is the one that waits for a person to say so; `off` is the operator's
-  // directory, capturing from start as it always has.
+  // `arm` and `spoken` are the modes that wait for a person to say so; `off` is the
+  // operator's directory, capturing from start as it always has.
   armedAtStart: config.calibrationMode === "off",
   sessionMs: config.calibrationSessionMs,
 });
+// The gate's effective values: a recorded calibration if there is one, seeded from the
+// configured defaults the first time calibration runs.
+const gateSettings = loadGateState(config);
 
 createOtaServer(config, registry);
-createWsServer(config, { registry, conversations, capture });
+createWsServer(config, { registry, conversations, capture, gateSettings });
 if (config.metricsPort !== null && config.metricsPort !== undefined) createMetricsServer(config);
 
 const wsUrl = `ws://${config.publicHost}:${config.wsPort}/xiaozhi/v1/`;

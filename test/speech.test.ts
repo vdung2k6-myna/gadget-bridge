@@ -42,6 +42,7 @@ const config: BridgeConfig = {
   calibrationDir: "",
     calibrationMode: "off",
     calibrationSessionMs: 600_000,
+    calibrationStatePath: "",
   historyTurns: 20,
   commandStep: 10,
   handoverMs: 400,

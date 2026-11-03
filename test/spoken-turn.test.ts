@@ -121,17 +121,26 @@ async function stubPlatform(
   requests: PlatformRequest[];
   /** What the bridge reported back about the gadget tools a turn asked for, in order. */
   toolResults: Array<Record<string, unknown>>;
+  /** The bodies of the bridge's own speech requests, for the spoken calibration. */
+  spoken: Array<Record<string, unknown>>;
   stop(): void;
 }> {
   activeCatalog = catalog as typeof activeCatalog;
   const requests: PlatformRequest[] = [];
   const toolResults: Array<Record<string, unknown>> = [];
+  const spoken: Array<Record<string, unknown>> = [];
   let calls = 0;
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
     req.on("end", () => {
       const body = Buffer.concat(chunks);
+      if ((req.url ?? "").startsWith("/api/voice/speak")) {
+        spoken.push(JSON.parse(body.toString("utf8")) as Record<string, unknown>);
+        res.writeHead(200, { "content-type": "audio/wav" });
+        res.end(Buffer.from(sentenceAudio(0.1), "base64"));
+        return;
+      }
       if ((req.url ?? "").startsWith("/api/personas")) {
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify(catalog));
@@ -154,6 +163,7 @@ async function stubPlatform(
   return {
     requests,
     toolResults,
+    spoken,
     url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
     stop() {
       server.closeAllConnections();
@@ -288,6 +298,7 @@ function configFor(platformUrl: string, overrides: Partial<BridgeConfig> = {}): 
     calibrationDir: "",
     calibrationMode: "off",
     calibrationSessionMs: 600_000,
+    calibrationStatePath: "",
     historyTurns: 20,
     commandStep: 10,
     handoverMs: 400,
@@ -819,6 +830,54 @@ describe("a person speaks to the gadget", () => {
         "the stop notice on the display"
       );
       assert.equal(capture.armed(), false);
+    } finally {
+      device.stop();
+      platform.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("starts the spoken session on the command, arms capture, and speaks the opening", async () => {
+    const platform = await stubPlatform((res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(sse("user", { text: "start voice calibration" }));
+      res.write(sse("done", { fullText: "" }));
+      res.end();
+    });
+    const dir = mkdtempSync(join(tmpdir(), "bridge-spoken-"));
+    const capture = createCapture(dir, { armedAtStart: false });
+    assert.ok(capture !== null);
+    const config = configFor(platform.url, {
+      calibrationDir: dir,
+      calibrationMode: "spoken",
+      calibrationSessionMs: 60_000,
+      marginalPeakRatio: 1,
+    });
+    const services: BridgeServices = {
+      registry: registryFor(config),
+      conversations: createConversations(config),
+      capture,
+      speechGate: {
+        async score() {
+          return { max: 0.99, mean: 0.9, frames: 10, strong: 10 };
+        },
+      },
+    };
+    const device = await spokenDevice(config, services);
+    try {
+      device.send({ type: "hello", version: 3, transport: "websocket" });
+      await device.until(() => device.messages.some((m) => m.includes('"hello"')), "the server hello");
+      device.send({ type: "listen", state: "start", mode: "manual" });
+      device.speak();
+
+      await waitFor(() => platform.spoken.length >= 1, "the opening instruction to be synthesized");
+      const opening = String(platform.spoken[0]?.["text"] ?? "");
+      assert.match(opening, /calibration/i);
+      assert.equal(capture.armed(), true, "the session armed capture");
+      await waitFor(
+        () => device.messages.some((m) => m.includes('"tts"')),
+        "the instruction to reach the device"
+      );
     } finally {
       device.stop();
       platform.stop();
