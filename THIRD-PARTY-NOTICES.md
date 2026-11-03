@@ -91,3 +91,18 @@ built it.
 
 The example hostname `chat.example.com` used throughout the documents and
 `.env.example` is reserved by RFC 2606 and belongs to nobody.
+
+## Silero VAD v5.1.2 — model weights, redistributed
+
+- **Where it comes from:** `models/vad/silero_vad.onnx`, copied from the `v5.1.2` tag of
+  https://github.com/snakers4/silero-vad. Its SHA-256 is recorded in
+  `models/vad/silero_vad.onnx.sha256` and checked when the bridge loads the model.
+- **License:** MIT, the same license as the repository that publishes it.
+- **What it does here:** classifies an utterance as speech or not before the turn is
+  uploaded. It does not transcribe, identify a speaker, or retain audio.
+
+## ONNX Runtime Web 1.30.0 — dependency
+
+- **Where it comes from:** the `onnxruntime-web` package pinned in `package.json`; its
+  WebAssembly runtime is part of the package and is not tracked in this repository.
+- **License:** MIT.

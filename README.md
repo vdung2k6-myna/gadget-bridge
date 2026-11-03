@@ -277,6 +277,15 @@ back as `đi` or `điều kiện`, while speech peaked 1.8–4.0×. A longer tra
 even from a marginal window, and a short answer that cleared the ratio is answered as
 before.
 
+Before a window is uploaded at all, the pinned Silero VAD model scores the trimmed utterance
+(`BRIDGE_SPEECH_PROB_MIN`, default 0.5). A frame counts at or above that probability, and the
+window is a turn only if at least `BRIDGE_SPEECH_MIN_FRAMES` frames count (default 3). A
+loud click or a door is one or two frames; a word is several. Measured on the pilot's audio
+(2026-11-03): broadband noise and a tone produced no qualifying frames, the fixture utterance
+75. A window with no speech is dropped without asking the platform, and the log names the
+frames, the peak and the duration. If the model cannot be loaded or its checksum does not
+match, the bridge warns once and passes turns through.
+
 A session nobody speaks into ends after `BRIDGE_SESSION_IDLE_MS`, measured by what
 a person was behind and by what the bridge still has to play — not by the bytes
 arriving, because a gadget streams whether or not anyone is speaking. Ending a

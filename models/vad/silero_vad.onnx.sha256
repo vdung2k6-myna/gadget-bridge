@@ -1,0 +1,8 @@
+# Silero VAD v5.1.2
+#
+# Source: https://github.com/snakers4/silero-vad/blob/v5.1.2/src/silero_vad/data/silero_vad.onnx
+# Downloaded from the tag, not from a branch: a branch would make the bytes this
+# build ships a moving target while the hash below stayed fixed.
+#
+# Verify from this directory with: sha256sum -c silero_vad.onnx.sha256
+2623a2953f6ff3d2c1e61740c6cdb7168133479b267dfef114a4a3cc5bdd788f  silero_vad.onnx

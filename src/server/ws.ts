@@ -10,6 +10,13 @@ import { authorizeDevice, describeDenial } from "../credentials.js";
 import { createGadget, type CommandOutcome } from "../gadget.js";
 import { createListening, type WindowStats } from "../listening.js";
 import { windowVerdict } from "../marginal.js";
+import { parseWavAudio } from "../protocol/wav.js";
+import {
+  samplesOf,
+  speechGate,
+  type SpeechGate,
+  type SpeechScore,
+} from "../speech-gate.js";
 import { err, info, log, runWithDevice, section, warn } from "../log.js";
 import { metrics } from "../metrics.js";
 import type { Gadget, Registry } from "../registry.js";
@@ -100,6 +107,11 @@ interface PairedSession {
 export interface WsServices {
   registry: Registry;
   conversations: Conversations;
+  /**
+   * The speech gate, when a caller supplies one. Undefined uses the deployment's own
+   * model; null is a gate that is unavailable, and every turn passes through it.
+   */
+  speechGate?: SpeechGate | null;
 }
 
 export function createWsServer(config: BridgeConfig, services: WsServices): WebSocketServer {
@@ -491,6 +503,45 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
       // (`music.ts`): it returns once the last piece is over rather than once the first is, and a
       // caller that reports what it did — or that is the turn's own tail — has to wait for it.
       return playTrack(speaker, track, config.musicGainDb);
+    }
+
+    /** Warn once when the gate's own inference fails, so a broken model is one line. */
+    let gateScoringFailed = false;
+
+    /**
+     * Whether this window is worth uploading at all: the pinned model scores the trimmed
+     * utterance, and a window with no speech in it never becomes a platform turn.
+     */
+    async function serveIfSpeech(
+      upload: { wav: Buffer | null; seconds: number; failed: number },
+      windowStats: WindowStats
+    ): Promise<void> {
+      if (upload.wav) {
+        const gate = services.speechGate === undefined ? await speechGate() : services.speechGate;
+        if (gate !== null) {
+          let score: SpeechScore | null = null;
+          try {
+            score = await gate.score(samplesOf(parseWavAudio(upload.wav).pcm), config.speechProbMin);
+          } catch (error) {
+            if (!gateScoringFailed) {
+              gateScoringFailed = true;
+              warn(
+                `speech gate: scoring failed (${error instanceof Error ? error.message : String(error)}); ` +
+                  `turns will not be gated`
+              );
+            }
+          }
+          if (score !== null && score.strong < config.speechMinFrames) {
+            info(
+              `dropped a window with no speech: ${score.strong}/${score.frames} frame(s) ` +
+                `at or above ${config.speechProbMin} over ${upload.seconds.toFixed(2)}s ` +
+                `(peak ${score.max.toFixed(3)}) — not a turn`
+            );
+            return;
+          }
+        }
+      }
+      await serveTurn(upload, windowStats);
     }
 
     async function serveTurn(
@@ -1139,7 +1190,7 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
           const upload = listening.upload();
           listening.open();
           session.listening = false;
-          void serveTurn(upload, windowStats);
+          void serveIfSpeech(upload, windowStats);
         } else if (verdict === "giveup") {
           // Nobody spoke into this window. No turn, and a fresh window so the person
           // who has not spoken yet still can (6.3, 6.4).

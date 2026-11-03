@@ -18,6 +18,7 @@
   "dependencies": {
     "@evan/opus": "^1.0.3",
     "mpg123-decoder": "^1.0.3",
+    "onnxruntime-web": "1.30.0",
     "ws": "^8.22.0"
   },
   "devDependencies": {

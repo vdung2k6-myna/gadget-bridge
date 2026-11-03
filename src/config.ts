@@ -191,6 +191,13 @@ export interface BridgeConfig {
   marginalPeakRatio: number;
   /** The longest transcript a marginal window may carry and still be answered. */
   marginalMaxWords: number;
+  /**
+   * The speech probability a frame must reach to count as speech. Assessed by the pinned
+   * Silero model over the trimmed utterance, before the platform is asked.
+   */
+  speechProbMin: number;
+  /** How many frames must reach it for the window to be uploaded — a click is one or two. */
+  speechMinFrames: number;
   /** The longest turn, as a backstop for a person who never stops. */
   maxTurnMs: number;
   /** How long a window may hold no speech at all before it is given up on. */
@@ -413,6 +420,12 @@ export const ENDPOINTER_DEFAULTS = {
    *  speech window. */
   marginalPeakRatio: 1.3,
   marginalMaxWords: 2,
+  /** The model's own scale: a frame at or above this reads as speech. Settled on the
+   *  board, where noise and a voice are both measured. */
+  speechProbMin: 0.5,
+  /** A 32 ms model frame: three of them is about a spoken syllable, and a transient is
+   *  one or two. */
+  speechMinFrames: 3,
   maxTurnMs: 20000,
   vadNoSpeechMs: 15000,
   drainGuardMs: 400,
@@ -460,6 +473,24 @@ function requireMarginalRule(config: { marginalPeakRatio: number; marginalMaxWor
   if (!Number.isInteger(config.marginalMaxWords) || config.marginalMaxWords < 1) {
     throw new Error(
       `BRIDGE_MARGINAL_MAX_WORDS must be a positive integer, got ${config.marginalMaxWords}`
+    );
+  }
+}
+
+/**
+ * The speech gate's threshold is a probability: 0 would pass every window and 1 would
+ * drop every one, so a value outside the open interval is a typo rather than a setting.
+ */
+function requireSpeechGate(config: { speechProbMin: number; speechMinFrames: number }): void {
+  if (!(config.speechProbMin > 0 && config.speechProbMin < 1)) {
+    throw new Error(
+      `BRIDGE_SPEECH_PROB_MIN must be between 0 and 1, got ${config.speechProbMin}: ` +
+        `at 0 every window is uploaded, at 1 none is`
+    );
+  }
+  if (!Number.isInteger(config.speechMinFrames) || config.speechMinFrames < 1) {
+    throw new Error(
+      `BRIDGE_SPEECH_MIN_FRAMES must be a positive integer, got ${config.speechMinFrames}`
     );
   }
 }
@@ -594,6 +625,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
     vadSpeechWindowMs: readInt(env, "BRIDGE_VAD_SPEECH_WINDOW_MS", ENDPOINTER_DEFAULTS.vadSpeechWindowMs),
     marginalPeakRatio: readNumber(env, "BRIDGE_MARGINAL_PEAK_RATIO", ENDPOINTER_DEFAULTS.marginalPeakRatio),
     marginalMaxWords: readInt(env, "BRIDGE_MARGINAL_MAX_WORDS", ENDPOINTER_DEFAULTS.marginalMaxWords),
+    speechProbMin: readNumber(env, "BRIDGE_SPEECH_PROB_MIN", ENDPOINTER_DEFAULTS.speechProbMin),
+    speechMinFrames: readInt(env, "BRIDGE_SPEECH_MIN_FRAMES", ENDPOINTER_DEFAULTS.speechMinFrames),
     maxTurnMs: readInt(env, "BRIDGE_MAX_TURN_MS", ENDPOINTER_DEFAULTS.maxTurnMs),
     vadNoSpeechMs: readInt(env, "BRIDGE_VAD_NO_SPEECH_MS", ENDPOINTER_DEFAULTS.vadNoSpeechMs),
     drainGuardMs: readInt(env, "BRIDGE_DRAIN_GUARD_MS", ENDPOINTER_DEFAULTS.drainGuardMs),
@@ -601,6 +634,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
   };
   requireEndpointer(endpointer);
   requireMarginalRule(endpointer);
+  requireSpeechGate(endpointer);
 
   return {
     otaPort: readInt(env, "OTA_PORT", 8003, PORT_MAX),

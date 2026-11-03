@@ -274,6 +274,9 @@ function configFor(platformUrl: string, overrides: Partial<BridgeConfig> = {}): 
     // rule would take for noise and drop every turn here. The rule itself is covered in
     // marginal.test.ts; this file is about the turn path.
     marginalPeakRatio: 1,
+    // The same voice is a tone, which the speech gate correctly reads as no speech. The
+    // gate's own tests cover that; here it must not remove the turns under test.
+    speechProbMin: 0.0001,
     sessionIdleMs: 60000,
     musicDir: "",
     musicGainDb: MUSIC_GAIN_DB_DEFAULT,
@@ -533,6 +536,82 @@ describe("a person speaks to the gadget", () => {
       assert.equal(typed.filter((m) => m.type === "tts").length, 0, "and nothing is spoken");
     } finally {
       console.log = original;
+      device.stop();
+      platform.stop();
+    }
+  });
+
+  it("does not upload a window that holds no speech", async () => {
+    const logged: string[] = [];
+    const original = console.log;
+    console.log = (...args: unknown[]): void => void logged.push(args.map(String).join(" "));
+    const platform = await stubPlatform((res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(sse("user", { text: "xin chao" }));
+      res.write(sse("done", { fullText: "" }));
+      res.end();
+    });
+    // Broadband noise, loud enough to cross the gate the way the pilot's room does. The
+    // harness's synthetic *voice* is a tone the model reads as speech-like once Opus has
+    // been through it, so noise is the honest non-speech signal here.
+    const noise = (() => {
+      const pcm = Buffer.alloc(SAMPLES_PER_FRAME * 2);
+      for (let i = 0; i < SAMPLES_PER_FRAME; i++) {
+        pcm.writeInt16LE(Math.round((Math.random() * 2 - 1) * 20000), i * 2);
+      }
+      const [packet] = encodeOpusFrames(pcm, 1, { sampleRate: RATE, frameMs: FRAME_MS });
+      return frame(packet!, 3);
+    })();
+    const device = await spokenDevice(
+      configFor(platform.url, { speechProbMin: 0.5, marginalPeakRatio: 1 })
+    );
+    try {
+      device.send({ type: "hello", version: 3, transport: "websocket" });
+      await device.until(() => device.messages.some((m) => m.includes('"hello"')), "the server hello");
+
+      device.send({ type: "listen", state: "start", mode: "manual" });
+      for (let i = 0; i < 40; i++) device.raw(ROOM);
+      for (let i = 0; i < 12; i++) device.raw(noise);
+      // More silence than the threshold asks for: the loud noise rings for a frame or two,
+      // and those frames reset the silence count.
+      for (let i = 0; i < 25; i++) device.raw(ROOM);
+
+      await device.until(
+        () => logged.some((line) => line.includes("dropped a window with no speech")),
+        "the speech gate to drop the window"
+      );
+      assert.equal(platform.requests.length, 0, "the platform was never asked");
+    } finally {
+      console.log = original;
+      device.stop();
+      platform.stop();
+    }
+  });
+
+  it("passes the turn through when the speech gate is unavailable", async () => {
+    const platform = await stubPlatform((res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(sse("user", { text: "xin chao" }));
+      res.write(sse("sentence", { index: 0, text: "Chao ban.", audioData: sentenceAudio(REPLY_SECONDS) }));
+      res.write(sse("done", { fullText: "Chao ban." }));
+      res.end();
+    });
+    const config = configFor(platform.url, { speechProbMin: 0.5, marginalPeakRatio: 1 });
+    const services: BridgeServices = {
+      registry: registryFor(config),
+      conversations: createConversations(config),
+      speechGate: null,
+    };
+    const device = await spokenDevice(config, services);
+    try {
+      device.send({ type: "hello", version: 3, transport: "websocket" });
+      await device.until(() => device.messages.some((m) => m.includes('"hello"')), "the server hello");
+
+      device.send({ type: "listen", state: "start", mode: "manual" });
+      device.speak();
+
+      await device.until(() => platform.requests.length === 1, "the turn to reach the platform");
+    } finally {
       device.stop();
       platform.stop();
     }

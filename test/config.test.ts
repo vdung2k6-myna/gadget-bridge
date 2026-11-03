@@ -200,3 +200,31 @@ describe("the marginal-window rule", () => {
     assert.equal(config.marginalMaxWords, 3);
   });
 });
+
+describe("the speech gate's threshold", () => {
+  it("defaults to the model's own scale", () => {
+    assert.equal(loadConfig(minimal).speechProbMin, 0.5);
+  });
+
+  it("refuses 0 and 1, which would pass or drop every window", () => {
+    assert.throws(
+      () => loadConfig(withEnv({ BRIDGE_SPEECH_PROB_MIN: "0" })),
+      /positive number/
+    );
+    assert.throws(
+      () => loadConfig(withEnv({ BRIDGE_SPEECH_PROB_MIN: "1" })),
+      /must be between 0 and 1/
+    );
+  });
+
+  it("refuses a frame minimum below one", () => {
+    assert.throws(
+      () => loadConfig(withEnv({ BRIDGE_SPEECH_MIN_FRAMES: "0" })),
+      /positive integer/
+    );
+  });
+
+  it("reads a value from the environment", () => {
+    assert.equal(loadConfig(withEnv({ BRIDGE_SPEECH_PROB_MIN: "0.7" })).speechProbMin, 0.7);
+  });
+});
