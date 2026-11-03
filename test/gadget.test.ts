@@ -100,6 +100,8 @@ function configFor(options: { commandStep?: number } = {}): BridgeConfig {
     musicDir: "",
     musicGainDb: MUSIC_GAIN_DB_DEFAULT,
     calibrationDir: "",
+    calibrationMode: "off",
+    calibrationSessionMs: 600_000,
     historyTurns: 20,
     commandStep: options.commandStep ?? 10,
     handoverMs: 400,

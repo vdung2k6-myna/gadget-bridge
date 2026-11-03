@@ -36,7 +36,12 @@ const registry = createRegistry(config);
 const conversations = createConversations(config);
 // Null unless the deployment names a directory: capture is a calibration session's
 // switch, and an ordinary bridge writes no window anywhere.
-const capture = createCapture(config.calibrationDir);
+const capture = createCapture(config.calibrationDir, {
+  // `arm` mode is the one that waits for a person to say so; `off` is the operator's
+  // directory, capturing from start as it always has.
+  armedAtStart: config.calibrationMode === "off",
+  sessionMs: config.calibrationSessionMs,
+});
 
 createOtaServer(config, registry);
 createWsServer(config, { registry, conversations, capture });

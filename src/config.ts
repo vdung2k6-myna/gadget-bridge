@@ -173,6 +173,17 @@ export interface BridgeConfig {
    */
   calibrationDir: string;
   /**
+   * How capture starts. Read from `BRIDGE_CALIBRATION_MODE`.
+   *
+   * `off` is today's behaviour: a directory that is set captures from the moment the bridge
+   * starts. `arm` leaves it disarmed until a person says the calibration command at the
+   * gadget, for a bounded session — a board in a room where the operator is not, and a
+   * directory that is not written to unless someone at the board asked for it.
+   */
+  calibrationMode: "off" | "arm";
+  /** How long an armed capture lasts, from `BRIDGE_CALIBRATION_SESSION_MS`. */
+  calibrationSessionMs: number;
+  /**
    * The rate the **device** encodes its uplink at, in Hz. Read from
    * `BRIDGE_DEVICE_RATE`; the firmware's own declaration is 16000.
    *
@@ -341,6 +352,29 @@ function readCalibrationDir(env: NodeJS.ProcessEnv): string {
     );
   }
   return value;
+}
+
+/**
+ * How capture starts: `off` (a set directory captures from start) or `arm` (a spoken
+ * command arms it for a session). Anything else is a deployment that believed it had a
+ * mode it does not have, and is refused rather than defaulted.
+ */
+function readCalibrationMode(env: NodeJS.ProcessEnv): "off" | "arm" {
+  const value = (env.BRIDGE_CALIBRATION_MODE ?? "off").trim().toLowerCase();
+  if (value === "" || value === "off") return "off";
+  if (value === "arm") return "arm";
+  throw new Error(
+    `BRIDGE_CALIBRATION_MODE must be "off" or "arm", got ${JSON.stringify(value)}`
+  );
+}
+
+/** An armed session's length, which a negative or zero figure would make meaningless. */
+function requireCalibration(config: { calibrationSessionMs: number }): void {
+  if (!Number.isFinite(config.calibrationSessionMs) || config.calibrationSessionMs <= 0) {
+    throw new Error(
+      `BRIDGE_CALIBRATION_SESSION_MS must be a positive number of milliseconds, got ${config.calibrationSessionMs}`
+    );
+  }
 }
 
 /**
@@ -671,6 +705,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
   requireEndpointer(endpointer);
   requireMarginalRule(endpointer);
   requireSpeechGate(endpointer);
+  const calibrationSessionMs = readInt(env, "BRIDGE_CALIBRATION_SESSION_MS", 600_000);
+  requireCalibration({ calibrationSessionMs });
 
   return {
     otaPort: readInt(env, "OTA_PORT", 8003, PORT_MAX),
@@ -705,6 +741,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
     musicDir: (env.BRIDGE_MUSIC_DIR ?? "").trim(),
     musicGainDb: readMusicGainDb(env),
     calibrationDir: readCalibrationDir(env),
+    calibrationMode: readCalibrationMode(env),
+    calibrationSessionMs,
     ...endpointer,
   };
 }

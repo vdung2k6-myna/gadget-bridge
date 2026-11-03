@@ -295,6 +295,14 @@ length, the gate's threshold, qualifying frames and peak probability, whether th
 sent, and the transcript when the platform produced one. Unset, nothing is written. The
 directory holds the person's speech: it is for a calibration session and is deleted afterwards.
 
+A deployment can also arm capture from the board, without a shell. With
+`BRIDGE_CALIBRATION_MODE=arm`, a configured directory writes nothing until a person says a whole
+utterance that is the calibration command — "bắt đầu hiệu chuẩn giọng nói" or "start voice
+calibration" — and then writes for `BRIDGE_CALIBRATION_SESSION_MS` (ten minutes by default).
+"Kết thúc hiệu chuẩn giọng nói" / "stop voice calibration" stops it early, and it expires by
+itself. Both transitions are logged and shown on the gadget's display. The command's own turn is
+not answered: the bridge aborts the platform's reply and carries the command out.
+
 The calibration runs as an MCP server (`npm run mcp:calibrate`) that an LLM drives. A phase
 brackets what the person is asked to do — `calibration_phase_start` with a label and whether
 speech is expected, `calibration_phase_end` when they confirm — and windows belong to the phase

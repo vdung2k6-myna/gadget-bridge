@@ -454,3 +454,49 @@ describe("the bridge's own commands, which are music", () => {
     );
   });
 });
+
+describe("the bridge's calibration commands", () => {
+  const options = { calibration: true };
+  const arm = { decider: "bridge", command: { task: "arm-calibration" } } as const;
+  const stop = { decider: "bridge", command: { task: "disarm-calibration" } } as const;
+
+  it("arms capture in each language, through the polite frames", () => {
+    for (const said of [
+      "bắt đầu hiệu chuẩn giọng nói",
+      "hiệu chuẩn giọng nói",
+      "làm ơn bắt đầu hiệu chuẩn giọng nói",
+    ]) {
+      assert.deepEqual(matchCommand("vietnamese", said, options), arm, said);
+    }
+    for (const said of ["start voice calibration", "begin calibration", "please start voice calibration"]) {
+      assert.deepEqual(matchCommand("english", said, options), arm, said);
+    }
+  });
+
+  it("stops capture in each language", () => {
+    for (const said of ["kết thúc hiệu chuẩn giọng nói", "dừng hiệu chuẩn", "tắt hiệu chuẩn giọng nói"]) {
+      assert.deepEqual(matchCommand("vietnamese", said, options), stop, said);
+    }
+    for (const said of ["stop voice calibration", "end calibration", "stop calibrating"]) {
+      assert.deepEqual(matchCommand("english", said, options), stop, said);
+    }
+  });
+
+  it("is not read where the deployment has no mode for it", () => {
+    assert.equal(matchCommand("vietnamese", "bắt đầu hiệu chuẩn giọng nói"), null);
+    assert.equal(matchCommand("english", "start voice calibration"), null);
+  });
+
+  it("leaves a sentence that merely contains the words alone", () => {
+    assert.equal(
+      matchCommand("vietnamese", "tôi muốn bắt đầu hiệu chuẩn giọng nói", options),
+      null
+    );
+    assert.equal(matchCommand("english", "how do I start voice calibration", options), null);
+  });
+
+  it("names the command for the log", () => {
+    assert.equal(describeCommand(arm), "a calibration to start");
+    assert.equal(describeCommand(stop), "the calibration to stop");
+  });
+});

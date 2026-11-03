@@ -8,8 +8,9 @@
  * the whole measurement a threshold is chosen from, and it is why this is not a debug
  * flag: the sidecar is the part a later analysis cannot reconstruct.
  *
- * The directory holds the person's speech. It is for a calibration session and is
- * deleted afterwards; nothing here retains it beyond the files the operator removes.
+ * In `arm` mode the directory is configured but nothing is written until a person arms
+ * it at the gadget; the arming is bounded by a session length. The directory holds the
+ * person's speech. It is for a calibration session and is deleted afterwards.
  */
 
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
@@ -35,7 +36,21 @@ export interface CapturedWindow {
 
 export interface Capture {
   readonly dir: string;
+  /** Whether windows are being written right now. */
+  armed(): boolean;
+  /** Start capturing for `ms` (the deployment's session length by default). */
+  arm(ms?: number): void;
+  /** Stop capturing, naming why. Idempotent: a capture already off does nothing. */
+  disarm(reason: string): void;
   record(evidence: WindowEvidence): CapturedWindow | null;
+}
+
+export interface CaptureOptions {
+  clock?: () => number;
+  /** Whether capture is on from the start; the spoken modes construct it disarmed. */
+  armedAtStart?: boolean;
+  /** How long `arm()` lasts when no length is given. */
+  sessionMs?: number;
 }
 
 /**
@@ -45,7 +60,7 @@ export interface Capture {
  * refusing to start: losing the measurement is a smaller failure than a bridge that
  * answers nobody.
  */
-export function createCapture(dir: string, clock: () => number = Date.now): Capture | null {
+export function createCapture(dir: string, options: CaptureOptions = {}): Capture | null {
   if (dir === "") return null;
   try {
     mkdirSync(dir, { recursive: true });
@@ -57,6 +72,11 @@ export function createCapture(dir: string, clock: () => number = Date.now): Capt
   }
   info(`calibration capture: ${dir}`);
 
+  const clock = options.clock ?? (() => Date.now());
+  const sessionMs = options.sessionMs ?? 600_000;
+  let capturing = options.armedAtStart ?? true;
+  let expiry: ReturnType<typeof setTimeout> | null = null;
+
   let failureReported = false;
   const failed = (doing: string, error: unknown): void => {
     if (failureReported) return;
@@ -67,9 +87,43 @@ export function createCapture(dir: string, clock: () => number = Date.now): Capt
     );
   };
 
+  if (capturing) info("calibration capture is on from start");
+
   return {
     dir,
+
+    armed: () => capturing,
+
+    arm(ms = sessionMs) {
+      capturing = true;
+      if (expiry !== null) clearTimeout(expiry);
+      expiry = setTimeout(() => {
+        expiry = null;
+        if (!capturing) return;
+        capturing = false;
+        info(
+          `calibration capture stopped: the session expired after ${(ms / 1000).toFixed(0)}s`
+        );
+      }, ms);
+      expiry.unref();
+      info(`calibration capture armed for ${(ms / 1000).toFixed(0)}s — windows are being written`);
+    },
+
+    disarm(reason: string) {
+      if (!capturing) return;
+      capturing = false;
+      if (expiry !== null) {
+        clearTimeout(expiry);
+        expiry = null;
+      }
+      info(`calibration capture stopped: ${reason}`);
+    },
+
     record(evidence) {
+      // Checked per window rather than only where capture is constructed: the point of
+      // arming is that it changes while the bridge runs.
+      if (!capturing) return null;
+
       const stem = `${clock()}-${sessionSlug(evidence.sessionId)}-${evidence.decision}`;
       const wavPath = join(dir, `${stem}.wav`);
       const jsonPath = join(dir, `${stem}.json`);

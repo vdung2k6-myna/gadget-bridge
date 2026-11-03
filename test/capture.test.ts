@@ -33,7 +33,7 @@ describe("calibration capture", () => {
   it("writes the window and its evidence, then the transcript", () => {
     const dir = mkdtempSync(join(tmpdir(), "bridge-capture-"));
     try {
-      const capture = createCapture(dir, () => 1_700_000_000_000);
+      const capture = createCapture(dir, { clock: () => 1_700_000_000_000 });
       assert.ok(capture !== null);
       const written = capture.record(evidence);
       assert.ok(written !== null);
@@ -61,7 +61,7 @@ describe("calibration capture", () => {
   it("keeps a session id that is a log token out of the file name", () => {
     const dir = mkdtempSync(join(tmpdir(), "bridge-capture-"));
     try {
-      const capture = createCapture(dir, () => 1);
+      const capture = createCapture(dir, { clock: () => 1 });
       assert.ok(capture !== null);
       capture.record({ ...evidence, sessionId: "smw0/1 2" });
       assert.deepEqual(readdirSync(dir).sort(), [
@@ -76,7 +76,7 @@ describe("calibration capture", () => {
   it("records a null gate when the model was unavailable", () => {
     const dir = mkdtempSync(join(tmpdir(), "bridge-capture-"));
     try {
-      const capture = createCapture(dir, () => 2);
+      const capture = createCapture(dir, { clock: () => 2 });
       assert.ok(capture !== null);
       capture.record({ ...evidence, gate: null, decision: "sent" });
       const sidecar = JSON.parse(
@@ -89,10 +89,46 @@ describe("calibration capture", () => {
     }
   });
 
+  it("writes nothing until it is armed, and stops when disarmed", () => {
+    const dir = mkdtempSync(join(tmpdir(), "bridge-capture-"));
+    try {
+      const capture = createCapture(dir, { clock: () => 4, armedAtStart: false });
+      assert.ok(capture !== null);
+      assert.equal(capture.armed(), false);
+      assert.equal(capture.record(evidence), null);
+
+      capture.arm(60_000);
+      assert.equal(capture.armed(), true);
+      assert.ok(capture.record(evidence) !== null);
+
+      capture.disarm("stopped by the person");
+      assert.equal(capture.armed(), false);
+      assert.equal(capture.record(evidence), null);
+      assert.equal(readdirSync(dir).length, 2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("disarms itself when the session length is up", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "bridge-capture-"));
+    try {
+      const capture = createCapture(dir, { clock: () => 5, armedAtStart: false });
+      assert.ok(capture !== null);
+      capture.arm(10);
+      assert.equal(capture.armed(), true);
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      assert.equal(capture.armed(), false, "the timer ended the session");
+      assert.equal(capture.record(evidence), null);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("reports a write failure without throwing", () => {
     const dir = mkdtempSync(join(tmpdir(), "bridge-capture-"));
     try {
-      const capture = createCapture(dir, () => 3);
+      const capture = createCapture(dir, { clock: () => 3 });
       assert.ok(capture !== null);
       chmodSync(dir, 0o500);
       assert.equal(capture.record(evidence), null);

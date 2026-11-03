@@ -127,6 +127,23 @@ describe("the rest of the configuration", () => {
     assert.equal(loadConfig(withEnv({ BRIDGE_CALIBRATION_DIR: "  " })).calibrationDir, "");
   });
 
+  it("starts capture by itself unless the mode says a person arms it", () => {
+    assert.equal(loadConfig(minimal).calibrationMode, "off");
+    assert.equal(loadConfig(withEnv({ BRIDGE_CALIBRATION_MODE: "arm" })).calibrationMode, "arm");
+    assert.throws(
+      () => loadConfig(withEnv({ BRIDGE_CALIBRATION_MODE: "always" })),
+      /BRIDGE_CALIBRATION_MODE must be "off" or "arm"/
+    );
+  });
+
+  it("refuses a calibration session that is not a positive length", () => {
+    assert.equal(loadConfig(minimal).calibrationSessionMs, 600_000);
+    assert.throws(
+      () => loadConfig(withEnv({ BRIDGE_CALIBRATION_SESSION_MS: "0" })),
+      /BRIDGE_CALIBRATION_SESSION_MS must be a positive/
+    );
+  });
+
   it("takes an absolute calibration directory and refuses a relative one", () => {
     assert.equal(
       loadConfig(withEnv({ BRIDGE_CALIBRATION_DIR: "/var/lib/bridge-calibration" })).calibrationDir,

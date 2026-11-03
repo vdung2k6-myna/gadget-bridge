@@ -421,7 +421,8 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
      *  answer rather than two, so that the branch that carries it out cannot read half of it. */
     type Taken =
       | { decider: "gadget"; command: GadgetCommand }
-      | { decider: "bridge"; music: SettledMusic };
+      | { decider: "bridge"; music: SettledMusic }
+      | { decider: "bridge"; calibration: "arm" | "stop" };
 
     /**
      * The bridge's answer to one of its own commands, or `null` where the directory cannot settle it.
@@ -431,7 +432,9 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
      * one that none carries is a request it cannot meet — and `null` is what leaves the utterance to
      * the platform, where a model can say what happened and ask what was meant.
      */
-    async function settle(command: BridgeCommand): Promise<SettledMusic | null> {
+    type MusicCommand = Extract<BridgeCommand, { task: "play-music" | "stop-music" }>;
+
+    async function settle(command: MusicCommand): Promise<SettledMusic | null> {
       if (command.task === "stop-music") return { task: "stop-music" };
 
       const choice = await chooseTrack(config.musicDir, command.query);
@@ -456,6 +459,41 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
      * that a request it cannot settle is never a command at all; by the time anything here runs the
      * choice exists, and the decode is the only step that can still fail.
      */
+    /** A line on the gadget's display and in the log, for a state the person changed by voice. */
+    function notice(message: string): void {
+      sendJson({ type: "alert", status: "Notice", message, emotion: "neutral" });
+      info(message);
+    }
+
+    /**
+     * Arm or stop the calibration capture from a spoken command.
+     *
+     * The directory is the deployment's; whether capture is writing is the person's, and
+     * bounded by the session length. Both transitions are shown, because a state entered by
+     * voice has no other witness on a board.
+     */
+    function carryOutCalibration(action: "arm" | "stop"): CommandOutcome {
+      const capture = services.capture ?? null;
+      if (capture === null) {
+        return { ok: false, detail: "this deployment has no calibration directory" };
+      }
+
+      if (action === "arm") {
+        capture.arm(config.calibrationSessionMs);
+        const detail = `calibration armed for ${Math.round(config.calibrationSessionMs / 1000)}s`;
+        notice(detail);
+        return { ok: true, detail };
+      }
+
+      if (!capture.armed()) {
+        notice("calibration was not running");
+        return { ok: true, detail: "calibration was not running" };
+      }
+      capture.disarm("stopped by the person");
+      notice("calibration stopped");
+      return { ok: true, detail: "calibration stopped" };
+    }
+
     async function carryOutMusic(command: SettledMusic): Promise<CommandOutcome> {
       if (command.task === "stop-music") {
         // A person asking a silent gadget to stop has been answered. Nothing playing is not a
@@ -806,7 +844,10 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
               // served by `takeTurn` rather than being matched against another language.
               const language = resolved.agent?.language;
               if (language === undefined) return;
-              const command = matchCommand(language, said, { music: config.musicDir !== "" });
+              const command = matchCommand(language, said, {
+                music: config.musicDir !== "",
+                calibration: config.calibrationMode !== "off" && config.calibrationDir !== "",
+              });
               if (command === null) return;
 
               // A request for music is only a command this bridge answers where its own directory
@@ -825,9 +866,15 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
               // answer is a reply the person hears half of. A directory listing is microseconds; a
               // five-megabyte mp3 is not, so the decode stays where it always was, below.
               if (command.decider === "bridge") {
-                const music = await settle(command.command);
-                if (music === null) return;
-                taken.command = { decider: "bridge", music };
+                if (command.command.task === "arm-calibration") {
+                  taken.command = { decider: "bridge", calibration: "arm" };
+                } else if (command.command.task === "disarm-calibration") {
+                  taken.command = { decider: "bridge", calibration: "stop" };
+                } else {
+                  const music = await settle(command.command);
+                  if (music === null) return;
+                  taken.command = { decider: "bridge", music };
+                }
               } else {
                 taken.command = command;
               }
@@ -897,7 +944,9 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
           const outcome =
             taken.command.decider === "gadget"
               ? await gadget.apply(taken.command.command)
-              : await carryOutMusic(taken.command.music);
+              : "music" in taken.command
+                ? await carryOutMusic(taken.command.music)
+                : carryOutCalibration(taken.command.calibration);
           if (outcome.ok) log(`command carried out: ${outcome.detail}`);
           else warn(`command not carried out: ${outcome.detail}`);
         } else if (!result.served) {

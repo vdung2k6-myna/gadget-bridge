@@ -51,7 +51,9 @@ export type GadgetCommand =
  */
 export type BridgeCommand =
   | { task: "play-music"; query: string }
-  | { task: "stop-music" };
+  | { task: "stop-music" }
+  | { task: "arm-calibration" }
+  | { task: "disarm-calibration" };
 
 /**
  * What a whole utterance turned out to be — and, because there are now two things that can answer
@@ -95,6 +97,16 @@ interface Grammar {
    * verb. "play the game" as an answer to a question is a whole utterance that begins with the
    * same word, and a form without the noun would eat it.
    */
+  /**
+   * The calibration commands, read only where the deployment has a mode that arms
+   * capture by voice. Whole utterances, three words or more: the marginal guard ahead of
+   * command matching drops a short transcript at a low ratio, and a two-word command
+   * could be eaten before it arrived here.
+   */
+  readonly calibration: {
+    readonly arm: readonly RegExp[];
+    readonly stop: readonly RegExp[];
+  };
   readonly music: {
     /**
      * The words a request for music may end on, which no other command may.
@@ -125,7 +137,7 @@ interface Grammar {
 export function matchCommand(
   language: TurnLanguage,
   utterance: string,
-  options: { music?: boolean } = {}
+  options: { music?: boolean; calibration?: boolean } = {}
 ): SpokenCommand | null {
   const grammar = GRAMMARS[language];
   if (grammar === undefined) return null;
@@ -148,6 +160,17 @@ export function matchCommand(
 
   for (const rule of grammar.rules) {
     if (rule.test.test(rest)) return { decider: "gadget", command: rule.command };
+  }
+
+  // Calibration before music: the phrases share no words with a request for a track, and
+  // reading them here keeps a deployment with no music from losing them.
+  if (options.calibration === true) {
+    for (const form of grammar.calibration.arm) {
+      if (form.test(rest)) return { decider: "bridge", command: { task: "arm-calibration" } };
+    }
+    for (const form of grammar.calibration.stop) {
+      if (form.test(rest)) return { decider: "bridge", command: { task: "disarm-calibration" } };
+    }
   }
 
   // The bridge's own forms last, so that nothing a setting's grammar already answers changes
@@ -185,6 +208,8 @@ export function matchCommand(
  */
 export function describeCommand(command: SpokenCommand): string {
   if (command.decider === "bridge") {
+    if (command.command.task === "arm-calibration") return "a calibration to start";
+    if (command.command.task === "disarm-calibration") return "the calibration to stop";
     if (command.command.task === "stop-music") return "the music to stop";
     return command.command.query === ""
       ? "some music"
@@ -320,6 +345,10 @@ const VIETNAMESE: Grammar = {
     { test: new RegExp(`^(dat |de |chinh |doi |cho )?am luong (thanh )?${COUNT}$`), setting: "volume" },
     { test: new RegExp(`^(dat |de |chinh |doi )?do sang (thanh )?${COUNT}$`), setting: "brightness" },
   ],
+  calibration: {
+    arm: [/^(bat dau|khoi dong) hieu chuan( giong noi)?$/, /^hieu chuan giong noi$/],
+    stop: [/^(ket thuc|dung|tat) hieu chuan( giong noi)?$/, /^thoi hieu chuan$/],
+  },
   // "cho tôi nghe nhạc" arrives here as "nghe nhac": the frames `cho toi` is stripped by, above.
   music: {
     // "lên" first, and it is the reason this list exists at all: `bật`, `mở`, `phát` and `nghe`
@@ -368,6 +397,10 @@ const ENGLISH: Grammar = {
     { test: new RegExp(`^(set |change |put )?(the )?volume (to |at )?${COUNT}$`), setting: "volume" },
     { test: new RegExp(`^(set |change )?(the )?brightness (to |at )?${COUNT}$`), setting: "brightness" },
   ],
+  calibration: {
+    arm: [/^(start|begin) (voice |the )?calibration( mode)?$/, /^voice calibration$/, /^calibrate (the )?voice$/],
+    stop: [/^(stop|end|finish) (voice |the )?calibration( mode)?$/, /^(stop|end) calibrating$/],
+  },
   music: {
     // Nothing the language's own suffixes do not already carry. English tags this request with
     // "please" and "for me", which are the shared frames above, and its verb takes no particle.

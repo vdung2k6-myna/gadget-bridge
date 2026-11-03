@@ -286,6 +286,8 @@ function configFor(platformUrl: string, overrides: Partial<BridgeConfig> = {}): 
     musicDir: "",
     musicGainDb: MUSIC_GAIN_DB_DEFAULT,
     calibrationDir: "",
+    calibrationMode: "off",
+    calibrationSessionMs: 600_000,
     historyTurns: 20,
     commandStep: 10,
     handoverMs: 400,
@@ -758,6 +760,68 @@ describe("a person speaks to the gadget", () => {
       device.stop();
       platform.stop();
       chmodSync(dir, 0o700);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("arms capture by voice, captures the next window, and stops by voice", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "bridge-arm-"));
+    // The harness binds its gadget to English, so the phrases are English ones.
+    const texts = ["start voice calibration", "hello there friend", "stop voice calibration"];
+    const platform = await stubPlatform((res, call) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(sse("user", { text: texts[call] ?? "" }));
+      res.write(sse("done", { fullText: "" }));
+      res.end();
+    });
+    const config = configFor(platform.url, {
+      calibrationDir: dir,
+      calibrationMode: "arm",
+      calibrationSessionMs: 60_000,
+      marginalPeakRatio: 1,
+    });
+    const capture = createCapture(dir, { armedAtStart: false, sessionMs: 60_000 });
+    assert.ok(capture !== null);
+    const services: BridgeServices = {
+      registry: registryFor(config),
+      conversations: createConversations(config),
+      capture,
+      speechGate: {
+        async score() {
+          return { max: 0.99, mean: 0.9, frames: 10, strong: 10 };
+        },
+      },
+    };
+    const device = await spokenDevice(config, services);
+    try {
+      device.send({ type: "hello", version: 3, transport: "websocket" });
+      await device.until(() => device.messages.some((m) => m.includes('"hello"')), "the server hello");
+      device.send({ type: "listen", state: "start", mode: "manual" });
+
+      device.speak();
+      await device.until(
+        () => device.messages.some((m) => m.includes("calibration armed")),
+        "the arming notice on the display"
+      );
+      assert.equal(capture.armed(), true);
+      assert.equal(readdirSync(dir).length, 0, "the command's own window is not a sample");
+
+      device.speak();
+      await waitFor(
+        () => readdirSync(dir).some((name) => name.endsWith("-sent.json")),
+        "the next window to be captured"
+      );
+      assert.equal(capture.armed(), true);
+
+      device.speak();
+      await device.until(
+        () => device.messages.some((m) => m.includes("calibration stopped")),
+        "the stop notice on the display"
+      );
+      assert.equal(capture.armed(), false);
+    } finally {
+      device.stop();
+      platform.stop();
       rmSync(dir, { recursive: true, force: true });
     }
   });
