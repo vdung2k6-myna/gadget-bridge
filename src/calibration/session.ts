@@ -35,8 +35,12 @@ const PHASES: ReadonlyArray<{ name: PhaseName; label: string; expect: PhaseExpec
  * caller waits it out), so the person has this long to answer; the room closes windows
  * of its own, so the phase keeps the one its own gate likes best.
  */
-const QUIET_MS = 30_000;
+const QUIET_MS = 45_000;
 const SAMPLE_WINDOW_MS = 10_000;
+
+/** Samples a speech phase wants, and the attempts it will spend to get them. */
+const SAMPLES_PER_PHASE = 3;
+const MAX_ATTEMPTS = 5;
 
 /** A window below this probability is room, not a sample, even if it is the best heard. */
 const SCORE_FLOOR = 0.2;
@@ -44,6 +48,7 @@ const SCORE_FLOOR = 0.2;
 interface Texts {
   open: string;
   phase: Record<PhaseName, string>;
+  retry: string;
   summary: (report: CalibrationReport) => string;
   applied: (threshold: number, minFrames: number) => string;
   kept: string;
@@ -53,8 +58,9 @@ interface Texts {
 const TEXTS: Record<TurnLanguage, Texts> = {
   vietnamese: {
     open: "Đây là buổi hiệu chuẩn. Thiết bị có thể im lặng — đó chính là điều đang đo. Bạn cứ từ từ.",
+    retry: "Chưa nghe rõ. ",
     phase: {
-      quiet: "Hãy giữ yên lặng khoảng ba mươi giây.",
+      quiet: "Hãy giữ yên lặng khoảng bốn mươi lăm giây.",
       normal: "Bây giờ nói một câu bình thường.",
       loud: "Nói câu đó to hơn một chút.",
       soft: "Nói câu đó thật nhỏ, như từ cuối phòng.",
@@ -71,8 +77,9 @@ const TEXTS: Record<TurnLanguage, Texts> = {
   },
   english: {
     open: "This is a calibration. The gadget may stay silent — that's what we're measuring. Take your time.",
+    retry: "I didn't catch that. ",
     phase: {
-      quiet: "Stay silent for about thirty seconds.",
+      quiet: "Stay silent for about forty-five seconds.",
       normal: "Say a normal sentence.",
       loud: "Say it a little louder.",
       soft: "Say it softly, as if from across the room.",
@@ -199,15 +206,35 @@ export function createSession(deps: SessionDeps): Session {
           if (phase.name === "quiet") {
             await wait(quietMs);
           } else {
-            const sample = await collect(sampleWindowMs);
-            if (sample === null || sample.score < scoreFloor) {
-              info(
-                `calibration phase ${phase.label}: no sample above ${scoreFloor} within ${sampleWindowMs}ms`
+            // Three samples, because one window is a coin toss: the room closes some of
+            // them, and a population of one or two cannot separate from the room's.
+            let accepted = 0;
+            for (let attempt = 0; accepted < SAMPLES_PER_PHASE && attempt < MAX_ATTEMPTS; attempt++) {
+              if (stopped) break;
+              await deps.speak(
+                attempt === 0 ? texts.phase[phase.name] : `${texts.retry}${texts.phase[phase.name]}`
               );
-            } else {
+              if (stopped) break;
+              const sample = await collect(sampleWindowMs);
+              if (sample === null || sample.score < scoreFloor) {
+                info(
+                  `calibration phase ${phase.label}: heard nothing above ${scoreFloor} on attempt ${attempt + 1}`
+                );
+                continue;
+              }
               const said = await deps.transcribe(sample.wav);
+              if ((said ?? "").trim() === "") {
+                info(`calibration phase ${phase.label}: attempt ${attempt + 1} had no words; asking again`);
+                continue;
+              }
               sample.captured?.setTranscript(said ?? "");
-              info(`calibration sample ${phase.label}: ${JSON.stringify(said ?? "")}`);
+              info(`calibration sample ${phase.label} ${accepted + 1}: ${JSON.stringify(said)}`);
+              accepted += 1;
+            }
+            if (accepted < SAMPLES_PER_PHASE) {
+              info(
+                `calibration phase ${phase.label}: ${accepted}/${SAMPLES_PER_PHASE} sample(s) after ${MAX_ATTEMPTS} attempt(s)`
+              );
             }
           }
         } finally {
