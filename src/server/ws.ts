@@ -1,7 +1,8 @@
 import type { IncomingMessage } from "node:http";
 import { WebSocketServer, type RawData, type WebSocket } from "ws";
 import type { BridgeConfig } from "../config.js";
-import { basename } from "node:path";
+import { writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import { describeCommand, matchCommand, type BridgeCommand, type GadgetCommand } from "../commands.js";
 import { BRIDGE_TOOL_PREFIX, chooseTrack, decodeTrack, listTrackNames, musicCommand, musicTools, playTrack } from "../music.js";
 import type { Track } from "../music.js";
@@ -532,6 +533,25 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
      * Whether this window is worth uploading at all: the pinned model scores the trimmed
      * utterance, and a window with no speech in it never becomes a platform turn.
      */
+    /**
+     * A field diagnostic, not a feature: with BRIDGE_DUMP_WAV_DIR set, every window the
+     * bridge considers is written there, its gate score in the file name. Temporary.
+     */
+    function dumpWindow(
+      upload: { wav: Buffer | null; seconds: number },
+      score: SpeechScore | null
+    ): void {
+      const dir = process.env.BRIDGE_DUMP_WAV_DIR;
+      if (!dir || !upload.wav) return;
+      const name = `${Date.now()}-${score ? `${score.strong}-${score.max.toFixed(3)}` : "ungated"}.wav`;
+      try {
+        writeFileSync(join(dir, name), upload.wav);
+        info(`dumped the window: ${join(dir, name)}`);
+      } catch (error) {
+        warn(`could not dump the window: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
     async function serveIfSpeech(
       upload: { wav: Buffer | null; seconds: number; failed: number },
       windowStats: WindowStats
@@ -551,6 +571,7 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
               );
             }
           }
+          dumpWindow(upload, score);
           if (score !== null && score.strong < config.speechMinFrames) {
             info(
               `dropped a window with no speech: ${score.strong}/${score.frames} frame(s) ` +
