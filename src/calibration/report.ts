@@ -48,9 +48,14 @@ export interface CalibrationReport {
   phases: Array<{ label: string; expect: PhaseExpectation; count: number }>;
   unlabelled: number;
   problems: NamedWindow[];
+  populations: { speech: number; silence: number; unconfirmed: number; noise: number };
+  /** Which population the capture does not have, when it has none of one. */
+  empty: "speech" | "silence" | "both" | null;
   thresholds: ThresholdRow[];
   recommendation: { threshold: number; margin: number } | null;
-  misses: NamedWindow[];
+  /** A speech-phase window the platform did not transcribe: room, or a missed utterance. */
+  unconfirmed: NamedWindow[];
+  /** A silence-phase window the platform transcribed: noise the gate would have spoken. */
   noise: NamedWindow[];
   overlap: { speechLowest: NamedWindow[]; silenceHighest: NamedWindow[] } | null;
 }
@@ -62,11 +67,33 @@ export interface CalibrationReport {
  * threshold when at least that many of its frames reach it, exactly as the live gate
  * decides. The recommendation is the lowest threshold that admits every speech window
  * and refuses every silence window; when none does, there is no recommendation.
+ *
+ * The speech population is the windows the platform transcribed, not every window a
+ * speech phase happened to contain: the endpointer also closes on the room between
+ * sentences, and counting that as speech makes every threshold fail. Silence-phase
+ * windows are the room by construction; one the platform transcribed is noise, and is
+ * named rather than counted as silence.
  */
 export function buildReport(scored: readonly ScoredWindow[], minFrames: number): CalibrationReport {
-  const speech = scored.filter((entry) => entry.phase?.expect === "speech");
-  const silence = scored.filter((entry) => entry.phase?.expect === "silence");
-  const unlabelled = scored.length - speech.length - silence.length;
+  const transcribed = (entry: ScoredWindow): boolean =>
+    (entry.window.sidecar?.transcript ?? "").trim() !== "";
+  const inSilence = (entry: ScoredWindow): boolean => entry.phase?.expect === "silence";
+
+  const noiseEntries = scored.filter((entry) => inSilence(entry) && transcribed(entry));
+  const silence = scored.filter((entry) => inSilence(entry) && !transcribed(entry));
+  const speech = scored.filter((entry) => !inSilence(entry) && transcribed(entry));
+  const unconfirmed = scored.filter(
+    (entry) => entry.phase?.expect === "speech" && !transcribed(entry)
+  );
+  const unlabelled = scored.length - speech.length - silence.length - unconfirmed.length - noiseEntries.length;
+  const empty =
+    speech.length === 0 && silence.length === 0
+      ? "both"
+      : speech.length === 0
+        ? "speech"
+        : silence.length === 0
+          ? "silence"
+          : null;
 
   const thresholds = [
     ...new Set(scored.flatMap((entry) => entry.scores.map((score) => score.threshold))),
@@ -91,16 +118,11 @@ export function buildReport(scored: readonly ScoredWindow[], minFrames: number):
 
   const separating = rows.find((row) => row.separates);
   const recommendation =
-    separating === undefined
+    separating === undefined || empty !== null
       ? null
       : {
           threshold: separating.threshold,
-          margin:
-            speech.length === 0 || silence.length === 0
-              ? 0
-              : round(
-                  Math.min(...speech.map(maxOf)) - Math.max(...silence.map(maxOf))
-                ),
+          margin: round(Math.min(...speech.map(maxOf)) - Math.max(...silence.map(maxOf))),
         };
 
   const phases: CalibrationReport["phases"] = [];
@@ -121,20 +143,19 @@ export function buildReport(scored: readonly ScoredWindow[], minFrames: number):
     problems: scored
       .filter((entry) => entry.window.problem !== null)
       .map((entry) => named(entry)),
+    populations: {
+      speech: speech.length,
+      silence: silence.length,
+      unconfirmed: unconfirmed.length,
+      noise: noiseEntries.length,
+    },
+    empty,
     thresholds: rows,
     recommendation,
-    misses: speech
-      .filter(
-        (entry) =>
-          entry.window.sidecar !== null &&
-          (entry.window.sidecar.transcript ?? "").trim() === ""
-      )
-      .map((entry) => named(entry)),
-    noise: silence
-      .filter((entry) => (entry.window.sidecar?.transcript ?? "").trim() !== "")
-      .map((entry) => named(entry)),
+    unconfirmed: unconfirmed.map((entry) => named(entry)),
+    noise: noiseEntries.map((entry) => named(entry)),
     overlap:
-      recommendation !== null
+      recommendation !== null || empty !== null
         ? null
         : {
             speechLowest: [...speech]

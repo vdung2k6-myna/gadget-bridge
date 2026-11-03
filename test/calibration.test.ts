@@ -185,8 +185,10 @@ describe("the calibration report", () => {
 
     assert.equal(report.recommendation?.threshold, 0.3);
     assert.equal(report.recommendation?.margin, 0.7);
-    assert.deepEqual(report.misses, []);
+    assert.deepEqual(report.unconfirmed, []);
     assert.equal(report.overlap, null);
+    assert.equal(report.empty, null);
+    assert.deepEqual(report.populations, { speech: 2, silence: 1, unconfirmed: 0, noise: 0 });
   });
 
   it("says the capture does not separate when a silence window clears the threshold", () => {
@@ -194,6 +196,9 @@ describe("the calibration report", () => {
       [
         entry("a", "normal", "speech", "xin chao", [
           { threshold: 0.5, strong: 8, max: 0.9 },
+        ]),
+        entry("b", "quiet", "silence", null, [
+          { threshold: 0.5, strong: 4, max: 0.6 },
         ]),
         entry("c", "quiet", "silence", "đi", [
           { threshold: 0.5, strong: 4, max: 0.6 },
@@ -205,21 +210,43 @@ describe("the calibration report", () => {
     assert.equal(report.recommendation, null);
     assert.ok(report.overlap !== null);
     assert.equal(report.overlap.speechLowest[0]?.stem, "a");
-    assert.equal(report.overlap.silenceHighest[0]?.stem, "c");
+    assert.equal(report.overlap.silenceHighest[0]?.stem, "b");
     assert.equal(report.noise[0]?.transcript, "đi");
+    assert.deepEqual(report.populations, { speech: 1, silence: 1, unconfirmed: 0, noise: 1 });
   });
 
-  it("names a speech phase window the platform did not transcribe", () => {
+  it("leaves a speech-phase window with no transcript unconfirmed and out of the populations", () => {
     const report = buildReport(
       [
-        entry("a", "normal", "speech", "", [
+        entry("a", "normal", "speech", "xin chao", [
+          { threshold: 0.5, strong: 8, max: 0.9 },
+        ]),
+        entry("b", "normal", "speech", "", [
+          { threshold: 0.5, strong: 0, max: 0.1 },
+        ]),
+        entry("c", "quiet", "silence", null, [
+          { threshold: 0.5, strong: 0, max: 0.2 },
+        ]),
+      ],
+      3
+    );
+    assert.equal(report.unconfirmed[0]?.stem, "b");
+    assert.deepEqual(report.populations, { speech: 1, silence: 1, unconfirmed: 1, noise: 0 });
+    assert.equal(report.recommendation?.threshold, 0.5);
+  });
+
+  it("names the population the capture does not have", () => {
+    const report = buildReport(
+      [
+        entry("a", "normal", "speech", "xin chao", [
           { threshold: 0.5, strong: 8, max: 0.9 },
         ]),
       ],
       3
     );
-    assert.equal(report.misses[0]?.stem, "a");
-    assert.equal(report.unlabelled, 0);
+    assert.equal(report.empty, "silence");
+    assert.equal(report.recommendation, null);
+    assert.equal(report.overlap, null);
   });
 
   it("counts a window outside every phase as unlabelled", () => {
@@ -265,6 +292,8 @@ describe("the calibration MCP server", () => {
       const promptText = text?.type === "text" ? text.text : "";
       assert.match(promptText, /may not\s+reply/);
       assert.match(promptText, /keep the operator calm/);
+      assert.match(promptText, /type your confirmation/i);
+      assert.match(promptText, /normal working noise/);
       assert.match(promptText, /calibration_report/);
 
       const started = await client.callTool({
