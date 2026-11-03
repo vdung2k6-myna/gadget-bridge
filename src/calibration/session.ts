@@ -29,9 +29,16 @@ const PHASES: ReadonlyArray<{ name: PhaseName; label: string; expect: PhaseExpec
   { name: "one-word", label: "one-word", expect: "speech" },
 ];
 
-/** The quiet phase's fixed wait, and how long one speech phase waits for a sample. */
+/**
+ * The quiet phase's fixed wait, and how long a speech phase collects windows before
+ * choosing one. The room closes windows of its own; taking the first would make the
+ * sample the room's, so the phase keeps the one its own gate likes best.
+ */
 const QUIET_MS = 30_000;
-const SAMPLE_MS = 60_000;
+const SAMPLE_WINDOW_MS = 6_000;
+
+/** A window below this probability is room, not a sample, even if it is the best heard. */
+const SCORE_FLOOR = 0.2;
 
 interface Texts {
   open: string;
@@ -98,7 +105,10 @@ export interface SessionDeps {
   minFrames: number;
   wait?: (ms: number) => Promise<void>;
   quietMs?: number;
-  sampleMs?: number;
+  /** How long a speech phase collects windows before taking the best one. */
+  sampleWindowMs?: number;
+  /** The probability below which the best window is still a miss. */
+  scoreFloor?: number;
   /** The report, for a test that does not want to run the model; production uses the capture. */
   report?: (dir: string, minFrames: number) => Promise<CalibrationReport>;
 }
@@ -106,14 +116,15 @@ export interface SessionDeps {
 export interface Session {
   start(): void;
   stop(reason: string): void;
-  /** A window the endpointer closed while the session was running. */
-  offer(wav: Buffer, captured: CapturedWindow | null): void;
+  /** A window the endpointer closed while a sample is being collected, with the gate's score. */
+  offer(wav: Buffer, captured: CapturedWindow | null, score?: number): void;
   active(): boolean;
 }
 
 interface Sample {
   wav: Buffer;
   captured: CapturedWindow | null;
+  score: number;
 }
 
 export function createSession(deps: SessionDeps): Session {
@@ -121,43 +132,35 @@ export function createSession(deps: SessionDeps): Session {
     deps.wait ??
     ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms).unref()));
   const quietMs = deps.quietMs ?? QUIET_MS;
-  const sampleMs = deps.sampleMs ?? SAMPLE_MS;
+  const sampleWindowMs = deps.sampleWindowMs ?? SAMPLE_WINDOW_MS;
+  const scoreFloor = deps.scoreFloor ?? SCORE_FLOOR;
   const texts = TEXTS[deps.language];
 
   let running = false;
   let stopped = false;
-  let pending: Sample | null = null;
-  let waiting: ((sample: Sample | null) => void) | null = null;
+  let collecting = false;
+  let best: Sample | null = null;
 
-  function offer(wav: Buffer, captured: CapturedWindow | null): void {
-    if (!running) return;
-    const sample = { wav, captured };
-    if (waiting !== null) {
-      const resolve = waiting;
-      waiting = null;
-      resolve(sample);
-    } else {
-      pending = sample;
-    }
+  function offer(wav: Buffer, captured: CapturedWindow | null, score = 0): void {
+    // Only while this phase is collecting: a window the room closed between phases is
+    // not this phase's sample, and a queued one would hand the next phase the room.
+    if (!running || !collecting) return;
+    const sample = { wav, captured, score };
+    if (best === null || sample.score > best.score) best = sample;
   }
 
-  function nextSample(ms: number): Promise<Sample | null> {
-    if (pending !== null) {
-      const sample = pending;
-      pending = null;
-      return Promise.resolve(sample);
+  /** Collect for a bounded stretch and take the window the gate liked best. */
+  async function collect(ms: number): Promise<Sample | null> {
+    collecting = true;
+    best = null;
+    try {
+      await wait(ms);
+    } finally {
+      collecting = false;
     }
-    return new Promise<Sample | null>((resolve) => {
-      const timer = setTimeout(() => {
-        if (waiting === resolve) waiting = null;
-        resolve(null);
-      }, ms);
-      timer.unref();
-      waiting = (sample) => {
-        clearTimeout(timer);
-        resolve(sample);
-      };
-    });
+    const sample = best;
+    best = null;
+    return sample;
   }
 
   function stop(reason: string): void {
@@ -165,11 +168,8 @@ export function createSession(deps: SessionDeps): Session {
     stopped = true;
     info(`calibration session stopping: ${reason}`);
     deps.notice(`calibration stopped: ${reason}`);
-    if (waiting !== null) {
-      const resolve = waiting;
-      waiting = null;
-      resolve(null);
-    }
+    collecting = false;
+    best = null;
   }
 
   async function report(): Promise<CalibrationReport> {
@@ -198,9 +198,11 @@ export function createSession(deps: SessionDeps): Session {
           if (phase.name === "quiet") {
             await wait(quietMs);
           } else {
-            const sample = await nextSample(sampleMs);
-            if (sample === null) {
-              info(`calibration phase ${phase.label}: heard nothing within ${sampleMs}ms`);
+            const sample = await collect(sampleWindowMs);
+            if (sample === null || sample.score < scoreFloor) {
+              info(
+                `calibration phase ${phase.label}: no sample above ${scoreFloor} within ${sampleWindowMs}ms`
+              );
             } else {
               const said = await deps.transcribe(sample.wav);
               sample.captured?.setTranscript(said ?? "");
@@ -220,7 +222,7 @@ export function createSession(deps: SessionDeps): Session {
 
       const recommendation = result.recommendation;
       if (recommendation !== null && !stopped) {
-        const answer = await nextSample(sampleMs);
+        const answer = await collect(sampleWindowMs);
         let accepted = false;
         if (answer !== null) {
           const said = await deps.transcribe(answer.wav);

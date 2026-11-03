@@ -1386,16 +1386,45 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
           listening.open();
           session.listening = false;
           if (calibrationSession !== null && calibrationSession.active() && upload.wav !== null) {
-            const captured =
-              services.capture?.record({
-                sessionId: session.id,
-                wav: upload.wav,
-                seconds: upload.seconds,
-                window: windowStats,
-                gate: null,
-                decision: "sent",
-              }) ?? null;
-            calibrationSession.offer(upload.wav, captured);
+            // Scored before it is offered: the phase keeps the window its own gate likes
+            // best, so the room closing first does not become the sample.
+            const active = calibrationSession;
+            const wav = upload.wav;
+            const gateProbMin = services.gateSettings?.settings.probMin ?? config.speechProbMin;
+            void (async () => {
+              let gateInfo: {
+                threshold: number;
+                strong: number;
+                frames: number;
+                max: number;
+              } | null = null;
+              let score = 0;
+              const gate = services.speechGate === undefined ? await speechGate() : services.speechGate;
+              if (gate !== null) {
+                try {
+                  const result = await gate.score(samplesOf(parseWavAudio(wav).pcm), gateProbMin);
+                  gateInfo = {
+                    threshold: gateProbMin,
+                    strong: result.strong,
+                    frames: result.frames,
+                    max: result.max,
+                  };
+                  score = result.max;
+                } catch {
+                  // A window the model cannot score is still offered, at the bottom.
+                }
+              }
+              const captured =
+                services.capture?.record({
+                  sessionId: session.id,
+                  wav,
+                  seconds: upload.seconds,
+                  window: windowStats,
+                  gate: gateInfo,
+                  decision: "sent",
+                }) ?? null;
+              active.offer(wav, captured, score);
+            })();
             return;
           }
           void serveIfSpeech(upload, windowStats);

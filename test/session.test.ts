@@ -95,8 +95,7 @@ describe("the spoken session", () => {
       capture,
       minFrames: 3,
       quietMs: 5,
-      sampleMs: 50,
-      wait: async () => {},
+      sampleWindowMs: 50,
       speak: async (text) => {
         spoken.push(text);
       },
@@ -110,7 +109,7 @@ describe("the spoken session", () => {
 
     session.start();
     const offers = setInterval(() => {
-      if (session.active()) session.offer(Buffer.alloc(2), null);
+      if (session.active()) session.offer(Buffer.alloc(2), null, 0.9);
     }, 5);
     try {
       await waitFor(() => !session.active() && applied.length > 0, "the session to apply");
@@ -138,8 +137,7 @@ describe("the spoken session", () => {
       capture,
       minFrames: 3,
       quietMs: 5,
-      sampleMs: 50,
-      wait: async () => {},
+      sampleWindowMs: 50,
       speak: async (text) => {
         spoken.push(text);
       },
@@ -153,7 +151,7 @@ describe("the spoken session", () => {
 
     session.start();
     const offers = setInterval(() => {
-      if (session.active()) session.offer(Buffer.alloc(2), null);
+      if (session.active()) session.offer(Buffer.alloc(2), null, 0.9);
     }, 5);
     try {
       await waitFor(() => !session.active(), "the session to end");
@@ -177,8 +175,7 @@ describe("the spoken session", () => {
       capture,
       minFrames: 3,
       quietMs: 5,
-      sampleMs: 20,
-      wait: async () => {},
+      sampleWindowMs: 20,
       speak: async (text) => {
         spoken.push(text);
       },
@@ -190,7 +187,7 @@ describe("the spoken session", () => {
 
     session.start();
     const offers = setInterval(() => {
-      if (session.active()) session.offer(Buffer.alloc(2), null);
+      if (session.active()) session.offer(Buffer.alloc(2), null, 0.9);
     }, 5);
     try {
       await waitFor(() => !session.active(), "the session to end");
@@ -212,8 +209,7 @@ describe("the spoken session", () => {
       capture,
       minFrames: 3,
       quietMs: 5,
-      sampleMs: 20,
-      wait: async () => {},
+      sampleWindowMs: 20,
       speak: async () => {},
       transcribe: async () => null,
       apply: () => assert.fail("nothing should be applied"),
