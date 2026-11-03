@@ -91,7 +91,21 @@ const TEXTS: Record<TurnLanguage, Texts> = {
   },
 };
 
-const YES = new Set(["u", "ung", "co", "ok", "oke", "yes", "yeah", "dong y", "dung roi", "da vang"]);
+const YES = new Set([
+  "u",
+  "ung",
+  "co",
+  "ok",
+  "oke",
+  "yes",
+  "yeah",
+  "apply",
+  "dong y",
+  "dung roi",
+  "da vang",
+  "ap dung",
+  "ap dung di",
+]);
 const NO = new Set(["khong", "thoi", "no", "nope", "khong dong y"]);
 
 export interface SessionDeps {
@@ -269,6 +283,7 @@ export function createSession(deps: SessionDeps): Session {
         if (answer !== null) {
           const said = await deps.transcribe(answer.wav);
           answer.captured?.setTranscript(said ?? "");
+          info(`calibration answer: ${JSON.stringify(said ?? "")}`);
           accepted = isYes(said ?? "");
         }
         if (accepted) {

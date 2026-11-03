@@ -233,7 +233,7 @@ describe("the spoken session", () => {
 
 describe("the yes/no answer", () => {
   it("reads a small yes and a small no, and nothing else", () => {
-    for (const yes of ["ừ", "có", "đồng ý", "yes", "ok", "dạ vâng"]) {
+    for (const yes of ["ừ", "có", "đồng ý", "yes", "ok", "dạ vâng", "áp dụng", "apply"]) {
       assert.equal(isYes(yes), true, yes);
     }
     for (const no of ["không", "thôi", "no", "", "giữ nguyên nhé"]) {
