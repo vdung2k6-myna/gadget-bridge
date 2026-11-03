@@ -467,6 +467,7 @@ describe("the bridge's calibration commands", () => {
       "làm ơn bắt đầu hiệu chuẩn giọng nói",
       "bắt đầu hiệu chỉnh giọng nói",
       "tôi muốn hiệu chỉnh giọng nói",
+      "bắt đầu hiệu chỉnh Dũng nói",
     ]) {
       assert.deepEqual(matchCommand("vietnamese", said, options), arm, said);
     }
@@ -476,7 +477,12 @@ describe("the bridge's calibration commands", () => {
   });
 
   it("stops capture in each language", () => {
-    for (const said of ["kết thúc hiệu chuẩn giọng nói", "dừng hiệu chuẩn", "tắt hiệu chuẩn giọng nói"]) {
+    for (const said of [
+      "kết thúc hiệu chuẩn giọng nói",
+      "dừng hiệu chuẩn",
+      "tắt hiệu chuẩn giọng nói",
+      "kết thúc hiệu chỉnh Dũng nói",
+    ]) {
       assert.deepEqual(matchCommand("vietnamese", said, options), stop, said);
     }
     for (const said of ["stop voice calibration", "end calibration", "stop calibrating"]) {

@@ -349,11 +349,14 @@ const VIETNAMESE: Grammar = {
     // "hiệu chuẩn" and "hiệu chỉnh" are a transcriber's coin toss on the pilot (measured
     // 2026-11-03: "bắt đầu hiệu chỉnh giọng nói"), and the whole-utterance rule keeps the
     // two from swallowing anything else.
+    // Up to two trailing words are tolerated because the transcriber garbles the tail
+    // (measured on the pilot 2026-11-03: "kết thúc hiệu chỉnh Dũng nói" for "giọng nói"),
+    // and the whole-utterance rule still holds: the command has to start the utterance.
     arm: [
-      /^(toi muon )?(bat dau|khoi dong) hieu (chuan|chinh)( giong noi)?$/,
-      /^(toi muon )?hieu (chuan|chinh) giong noi$/,
+      /^(toi muon )?(bat dau|khoi dong) hieu (chuan|chinh)( \S+){0,2}$/,
+      /^(toi muon )?hieu (chuan|chinh) giong noi( \S+){0,2}$/,
     ],
-    stop: [/^(toi muon )?(ket thuc|dung|tat|thoi) hieu (chuan|chinh)( giong noi)?$/],
+    stop: [/^(toi muon )?(ket thuc|dung|tat|thoi) hieu (chuan|chinh)( \S+){0,2}$/],
   },
   // "cho tôi nghe nhạc" arrives here as "nghe nhac": the frames `cho toi` is stripped by, above.
   music: {
