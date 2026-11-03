@@ -465,6 +465,8 @@ describe("the bridge's calibration commands", () => {
       "bắt đầu hiệu chuẩn giọng nói",
       "hiệu chuẩn giọng nói",
       "làm ơn bắt đầu hiệu chuẩn giọng nói",
+      "bắt đầu hiệu chỉnh giọng nói",
+      "tôi muốn hiệu chỉnh giọng nói",
     ]) {
       assert.deepEqual(matchCommand("vietnamese", said, options), arm, said);
     }
@@ -489,7 +491,7 @@ describe("the bridge's calibration commands", () => {
 
   it("leaves a sentence that merely contains the words alone", () => {
     assert.equal(
-      matchCommand("vietnamese", "tôi muốn bắt đầu hiệu chuẩn giọng nói", options),
+      matchCommand("vietnamese", "hôm nay bắt đầu hiệu chuẩn giọng nói", options),
       null
     );
     assert.equal(matchCommand("english", "how do I start voice calibration", options), null);

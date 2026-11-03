@@ -346,8 +346,14 @@ const VIETNAMESE: Grammar = {
     { test: new RegExp(`^(dat |de |chinh |doi )?do sang (thanh )?${COUNT}$`), setting: "brightness" },
   ],
   calibration: {
-    arm: [/^(bat dau|khoi dong) hieu chuan( giong noi)?$/, /^hieu chuan giong noi$/],
-    stop: [/^(ket thuc|dung|tat) hieu chuan( giong noi)?$/, /^thoi hieu chuan$/],
+    // "hiệu chuẩn" and "hiệu chỉnh" are a transcriber's coin toss on the pilot (measured
+    // 2026-11-03: "bắt đầu hiệu chỉnh giọng nói"), and the whole-utterance rule keeps the
+    // two from swallowing anything else.
+    arm: [
+      /^(toi muon )?(bat dau|khoi dong) hieu (chuan|chinh)( giong noi)?$/,
+      /^(toi muon )?hieu (chuan|chinh) giong noi$/,
+    ],
+    stop: [/^(toi muon )?(ket thuc|dung|tat|thoi) hieu (chuan|chinh)( giong noi)?$/],
   },
   // "cho tôi nghe nhạc" arrives here as "nghe nhac": the frames `cho toi` is stripped by, above.
   music: {
