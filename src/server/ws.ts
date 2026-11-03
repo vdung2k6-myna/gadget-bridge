@@ -506,6 +506,15 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
           speaker.beginTurn();
           speaker.speak({ index: 0, text, audio });
           speaker.finish();
+          // The phase's collection starts when the instruction has finished being heard,
+          // not when it was queued: the microphone is distrusted while it plays, and a
+          // collection begun now would spend its first seconds on our own voice.
+          const until = speaker.drainingUntil();
+          if (until !== null) {
+            await new Promise<void>((resolve) =>
+              setTimeout(resolve, Math.max(0, until - Date.now())).unref()
+            );
+          }
         },
         transcribe: async (wav) => {
           let said: string | null = null;

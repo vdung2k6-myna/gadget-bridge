@@ -31,11 +31,12 @@ const PHASES: ReadonlyArray<{ name: PhaseName; label: string; expect: PhaseExpec
 
 /**
  * The quiet phase's fixed wait, and how long a speech phase collects windows before
- * choosing one. The room closes windows of its own; taking the first would make the
- * sample the room's, so the phase keeps the one its own gate likes best.
+ * choosing one. Collection starts only after the instruction has finished playing (the
+ * caller waits it out), so the person has this long to answer; the room closes windows
+ * of its own, so the phase keeps the one its own gate likes best.
  */
 const QUIET_MS = 30_000;
-const SAMPLE_WINDOW_MS = 6_000;
+const SAMPLE_WINDOW_MS = 10_000;
 
 /** A window below this probability is room, not a sample, even if it is the best heard. */
 const SCORE_FLOOR = 0.2;
