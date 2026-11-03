@@ -12,6 +12,7 @@ import type { RuntimeLlm, RuntimeProvider, TurnLanguage } from "../src/turn.js";
 import { createConversations } from "../src/conversation.js";
 import { deriveToken, normalizeDeviceId } from "../src/credentials.js";
 import type { Gadget, Registry } from "../src/registry.js";
+import type { SpeechGate } from "../src/speech-gate.js";
 import { createWsServer } from "../src/server/ws.js";
 import { frame } from "../src/protocol/framing.js";
 import { encodeOpusFrames } from "../src/protocol/opus.js";
@@ -583,6 +584,50 @@ describe("a person speaks to the gadget", () => {
       assert.equal(platform.requests.length, 0, "the platform was never asked");
     } finally {
       console.log = original;
+      device.stop();
+      platform.stop();
+    }
+  });
+
+  it("keeps judging after a dropped window, since the device never sends listen start", async () => {
+    const platform = await stubPlatform((res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(sse("user", { text: "xin chao" }));
+      res.write(sse("done", { fullText: "" }));
+      res.end();
+    });
+    // The first window scores as silence; every later one as speech. What is under test is
+    // the window, not the model: a bridge that drops the first utterance without reopening
+    // its window judges nothing that follows — the device never left `Listening`, so it
+    // sends no `listen start` — and the platform is never asked again.
+    let scored = 0;
+    const gate: SpeechGate = {
+      async score() {
+        scored += 1;
+        return scored === 1
+          ? { max: 0.01, mean: 0.005, frames: 10, strong: 0 }
+          : { max: 0.99, mean: 0.9, frames: 10, strong: 10 };
+      },
+    };
+    const config = configFor(platform.url, { marginalPeakRatio: 1 });
+    const services: BridgeServices = {
+      registry: registryFor(config),
+      conversations: createConversations(config),
+      speechGate: gate,
+    };
+    const device = await spokenDevice(config, services);
+    try {
+      device.send({ type: "hello", version: 3, transport: "websocket" });
+      await device.until(() => device.messages.some((m) => m.includes('"hello"')), "the server hello");
+
+      device.send({ type: "listen", state: "start", mode: "manual" });
+      device.speak();
+      await device.until(() => scored === 1, "the first window to be scored");
+      assert.equal(platform.requests.length, 0, "the first window was not sent");
+
+      device.speak();
+      await device.until(() => platform.requests.length === 1, "the next window to be judged");
+    } finally {
       device.stop();
       platform.stop();
     }

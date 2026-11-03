@@ -509,6 +509,26 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
     let gateScoringFailed = false;
 
     /**
+     * Give the device its window back after one that was never a turn.
+     *
+     * A window the bridge decides not to send — no speech in it, or nothing decodable —
+     * leaves the device exactly where a turn that said nothing does: it never left
+     * `Listening`, so it will not send the `listen start` that opens the next window, and
+     * every frame after this one is counted and not judged until the session idles out
+     * (a pilot session went deaf for its whole 60 s that way). The window is the bridge's
+     * own state (D9), so the bridge is the one to reopen it. The trigger has already
+     * reopened it once; this second open discards only the frames that arrived while the
+     * gate was scoring, none of which were judged, rather than judging them against a
+     * window whose opening audio was never meant to be part of it.
+     */
+    function reopenWindow(): void {
+      if (closed || session.listening) return;
+      session.listening = true;
+      listening.open();
+      log("nothing was sent — the window is open again, since the device never left Listening");
+    }
+
+    /**
      * Whether this window is worth uploading at all: the pinned model scores the trimmed
      * utterance, and a window with no speech in it never becomes a platform turn.
      */
@@ -537,6 +557,7 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
                 `at or above ${config.speechProbMin} over ${upload.seconds.toFixed(2)}s ` +
                 `(peak ${score.max.toFixed(3)}) — not a turn`
             );
+            reopenWindow();
             return;
           }
         }
@@ -559,6 +580,7 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
                 `rather than an empty one`
             : `no utterance was located in the window — sending no turn rather than a guessed slice`
         );
+        reopenWindow();
         return;
       }
 
