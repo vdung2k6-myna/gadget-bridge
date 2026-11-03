@@ -52,7 +52,11 @@ export interface CalibrationReport {
   /** Which population the capture does not have, when it has none of one. */
   empty: "speech" | "silence" | "both" | null;
   thresholds: ThresholdRow[];
-  recommendation: { threshold: number; margin: number } | null;
+  recommendation: {
+    threshold: number;
+    range: { low: number; high: number };
+    margin: number;
+  } | null;
   /** A speech-phase window the platform did not transcribe: room, or a missed utterance. */
   unconfirmed: NamedWindow[];
   /** A silence-phase window the platform transcribed: noise the gate would have spoken. */
@@ -116,12 +120,20 @@ export function buildReport(scored: readonly ScoredWindow[], minFrames: number):
     };
   });
 
-  const separating = rows.find((row) => row.separates);
+  const separating = rows.filter((row) => row.separates);
   const recommendation =
-    separating === undefined || empty !== null
+    separating.length === 0 || empty !== null
       ? null
       : {
-          threshold: separating.threshold,
+          // The middle of the safe range, not its edge: the lowest threshold that
+          // separates sits one step above the room's ceiling, where a slightly louder
+          // room window next time would cross it. The range is reported with it, so an
+          // operator can see how much room the choice has.
+          threshold: separating[Math.floor(separating.length / 2)]!.threshold,
+          range: {
+            low: separating[0]!.threshold,
+            high: separating[separating.length - 1]!.threshold,
+          },
           margin: round(Math.min(...speech.map(maxOf)) - Math.max(...silence.map(maxOf))),
         };
 

@@ -183,7 +183,8 @@ describe("the calibration report", () => {
       3
     );
 
-    assert.equal(report.recommendation?.threshold, 0.3);
+    assert.equal(report.recommendation?.threshold, 0.5, "the middle of the separating range");
+    assert.deepEqual(report.recommendation?.range, { low: 0.3, high: 0.5 });
     assert.equal(report.recommendation?.margin, 0.7);
     assert.deepEqual(report.unconfirmed, []);
     assert.equal(report.overlap, null);
