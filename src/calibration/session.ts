@@ -35,9 +35,9 @@ const PHASES: ReadonlyArray<{ name: PhaseName; label: string; expect: PhaseExpec
  * caller waits it out), so the person has this long to answer; the room closes windows
  * of its own, so the phase keeps the one its own gate likes best.
  */
-const QUIET_MS = 60_000;
+const QUIET_MS = 30_000;
 /** How long a speech phase keeps listening, and how long the yes/no answer is awaited. */
-const PHASE_MS = 60_000;
+const PHASE_MS = 30_000;
 const ANSWER_MS = 20_000;
 
 /** A window below this probability is room, not a sample, even if it is the best heard. */
@@ -56,10 +56,10 @@ const TEXTS: Record<TurnLanguage, Texts> = {
   vietnamese: {
     open: "Đây là buổi hiệu chuẩn. Thiết bị có thể im lặng — đó chính là điều đang đo. Bạn cứ từ từ.",
     phase: {
-      quiet: "Hãy giữ yên lặng khoảng sáu mươi giây.",
-      normal: "Bây giờ nói vài câu bình thường trong khoảng sáu mươi giây, ngắt một chút giữa các câu.",
-      loud: "Nói vài câu to hơn một chút trong khoảng sáu mươi giây, ngắt một chút giữa các câu.",
-      soft: "Nói vài câu nhỏ, như từ cuối phòng, trong khoảng sáu mươi giây, ngắt một chút giữa các câu.",
+      quiet: "Hãy giữ yên lặng khoảng ba mươi giây.",
+      normal: "Bây giờ nói vài câu bình thường trong khoảng ba mươi giây, ngắt một chút giữa các câu.",
+      loud: "Nói vài câu to hơn một chút trong khoảng ba mươi giây, ngắt một chút giữa các câu.",
+      soft: "Nói vài câu nhỏ, như từ cuối phòng, trong khoảng ba mươi giây, ngắt một chút giữa các câu.",
     },
     summary: (report) => {
       const recommendation = report.recommendation;
@@ -73,10 +73,10 @@ const TEXTS: Record<TurnLanguage, Texts> = {
   english: {
     open: "This is a calibration. The gadget may stay silent — that's what we're measuring. Take your time.",
     phase: {
-      quiet: "Stay silent for about sixty seconds.",
-      normal: "Talk normally for about sixty seconds — a few sentences, with a short pause between them.",
-      loud: "Talk a little louder for about sixty seconds — a few sentences, pausing briefly between them.",
-      soft: "Talk softly, as if from across the room, for about sixty seconds — a few sentences, pausing between them.",
+      quiet: "Stay silent for about thirty seconds.",
+      normal: "Talk normally for about thirty seconds — a few sentences, with a short pause between them.",
+      loud: "Talk a little louder for about thirty seconds — a few sentences, pausing briefly between them.",
+      soft: "Talk softly, as if from across the room, for about thirty seconds — a few sentences, pausing between them.",
     },
     summary: (report) => {
       const recommendation = report.recommendation;
