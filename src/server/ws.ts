@@ -214,6 +214,11 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
           probMin: config.speechProbMin,
           minFrames: config.speechMinFrames,
         });
+    if (resolved.calibration !== null) {
+      info(
+        `calibration from the console: ${gateValues.probMin} with ${gateValues.minFrames} frame(s)`
+      );
+    }
     // What was said to this gadget before the bridge restarted, read back from the
     // record the console kept.
     services.conversations.seed(resolved.deviceId, resolved.turns);
