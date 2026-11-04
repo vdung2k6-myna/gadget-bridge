@@ -258,12 +258,13 @@ function registryFor(config: BridgeConfig): Registry {
         },
         partner: meta.partner.get(deviceId) ?? null,
         turns: recorded.get(deviceId) ?? [],
-        firmware: null,
+        firmware: null, calibration: null,
       };
     },
     reportTools: () => {},
     reportHardware: () => {},
     activate: async () => "owned",
+    saveCalibration: async () => {},
     recordTurn: (turn) => {
       const deviceId = normalizeDeviceId(turn.deviceId);
       const kept = recorded.get(deviceId) ?? [];

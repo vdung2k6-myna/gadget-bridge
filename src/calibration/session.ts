@@ -115,7 +115,7 @@ export interface SessionDeps {
   /** The platform's transcript of one sample, recorded nowhere. */
   transcribe(wav: Buffer): Promise<string | null>;
   /** Record and use a measured pair. */
-  apply(threshold: number, minFrames: number): void;
+  apply(threshold: number, minFrames: number): void | Promise<void>;
   notice(text: string): void;
   minFrames: number;
   wait?: (ms: number) => Promise<void>;
@@ -303,7 +303,7 @@ export function createSession(deps: SessionDeps): Session {
           accepted = isYes(said ?? "");
         }
         if (accepted) {
-          deps.apply(recommendation.threshold, deps.minFrames);
+          await deps.apply(recommendation.threshold, deps.minFrames);
           await deps.speak(texts.applied(recommendation.threshold, deps.minFrames));
         } else {
           deps.notice(texts.kept);

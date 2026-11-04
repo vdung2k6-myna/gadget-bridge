@@ -63,6 +63,8 @@ export interface Gadget {
   partner: string | null;
   turns: GadgetTurn[];
   firmware: FirmwareTarget | null;
+  /** The gate pair the console resolves for this device, or null when it names none. */
+  calibration: { threshold: number; minFrames: number } | null;
   activation?: { code: string };
 }
 
@@ -92,6 +94,8 @@ export interface Registry {
   activate(deviceId: string): Promise<ActivationState>;
   /** Fire-and-forget: a turn is never delayed or lost for a record's sake. */
   recordTurn(turn: RegistryTurn): void;
+  /** Save a calibration a device's own session measured. Throws when the console refuses. */
+  saveCalibration(deviceId: string, threshold: number, minFrames: number): Promise<void>;
   /** Drops a cached resolution, so the next call asks the console again. */
   forget(deviceId: string): void;
 }
@@ -230,6 +234,16 @@ export function createRegistry(
       );
     },
 
+    async saveCalibration(deviceId: string, threshold: number, minFrames: number): Promise<void> {
+      const response = await post("/api/bridge/calibration", { deviceId, threshold, minFrames });
+      if (!response.ok) {
+        const detail = await response.text().catch(() => "");
+        throw new Error(
+          `the console did not save the calibration (${response.status})${detail ? `: ${detail.slice(0, 200)}` : ""}`
+        );
+      }
+    },
+
     recordTurn(turn: RegistryTurn): void {
       void post("/api/bridge/turns", {
         deviceId: turn.deviceId,
@@ -291,6 +305,7 @@ function parseGadget(payload: unknown, expectedDeviceId: string): Gadget {
       partner: null,
       turns: [],
       firmware: null,
+      calibration: null,
       ...(typeof activation === "object" && activation !== null && typeof (activation as { code?: unknown }).code === "string"
         ? { activation: { code: (activation as { code: string }).code } }
         : {}),
@@ -305,6 +320,7 @@ function parseGadget(payload: unknown, expectedDeviceId: string): Gadget {
     partner: typeof body.partner === "string" ? normalizeDeviceId(body.partner) : null,
     turns: parseTurns(body.turns),
     firmware: parseFirmware(body.firmware, deviceId),
+    calibration: parseCalibration(body.calibration, deviceId),
   };
 }
 
@@ -317,6 +333,22 @@ function parseGadget(payload: unknown, expectedDeviceId: string): Gadget {
  * must be absolute http(s) — the firmware's downloader cannot do anything else —
  * and nothing here composes one from the request.
  */
+/** The gate pair, read leniently: an odd block leaves the bridge on its configured values. */
+function parseCalibration(
+  payload: unknown,
+  deviceId: string
+): { threshold: number; minFrames: number } | null {
+  if (payload === null || typeof payload !== "object") return null;
+  const value = payload as { threshold?: unknown; minFrames?: unknown };
+  const threshold = Number(value.threshold);
+  const minFrames = Number(value.minFrames);
+  if (Number.isFinite(threshold) && threshold > 0 && threshold < 1 && Number.isInteger(minFrames) && minFrames >= 1) {
+    return { threshold, minFrames };
+  }
+  warn(`the console's calibration for ${deviceId} is not a usable pair; the configured values are used`);
+  return null;
+}
+
 function parseFirmware(payload: unknown, deviceId: string): FirmwareTarget | null {
   if (payload === null || payload === undefined) return null;
 

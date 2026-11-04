@@ -51,7 +51,7 @@ function gadgetFor(overrides: Partial<Gadget> = {}): Gadget {
     agent: null,
     partner: null,
     turns: [],
-    firmware: null,
+    firmware: null, calibration: null,
     ...overrides,
   };
 }
@@ -66,6 +66,7 @@ function fakeRegistry(
     reportTools: () => {},
     reportHardware: (deviceId, hardware) => reportHardware(deviceId, hardware),
     activate: async (deviceId) => activate(deviceId),
+    saveCalibration: async () => {},
     recordTurn: () => {},
     forget: () => {},
   };

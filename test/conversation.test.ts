@@ -204,7 +204,7 @@ function gadgetFor(config: BridgeConfig): Gadget {
           },
     partner: null,
     turns: [],
-    firmware: null,
+    firmware: null, calibration: null,
   };
 }
 
@@ -217,11 +217,12 @@ const registry: Registry = {
     agent: null,
     partner: null,
     turns: [],
-    firmware: null,
+    firmware: null, calibration: null,
   }),
   reportTools: () => {},
   reportHardware: () => {},
   activate: async () => "owned",
+  saveCalibration: async () => {},
   recordTurn: () => {},
   forget: () => {},
 };

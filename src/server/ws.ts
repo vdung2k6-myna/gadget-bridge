@@ -208,11 +208,12 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
      * default otherwise. Resolved once for the connection; a calibration applied here
      * updates this snapshot, and another device's does not reach it.
      */
-    const gateValues: { probMin: number; minFrames: number } =
-      services.gateSettings?.forDevice(deviceId) ?? {
-        probMin: config.speechProbMin,
-        minFrames: config.speechMinFrames,
-      };
+    const gateValues: { probMin: number; minFrames: number } = resolved.calibration
+      ? { probMin: resolved.calibration.threshold, minFrames: resolved.calibration.minFrames }
+      : (services.gateSettings?.forDevice(deviceId) ?? {
+          probMin: config.speechProbMin,
+          minFrames: config.speechMinFrames,
+        });
     // What was said to this gadget before the bridge restarted, read back from the
     // record the console kept.
     services.conversations.seed(resolved.deviceId, resolved.turns);
@@ -509,12 +510,10 @@ export function createWsServer(config: BridgeConfig, services: WsServices): WebS
         dir: config.calibrationDir,
         capture,
         minFrames: gateValues.minFrames,
-        apply: (threshold, minFrames) => {
-          const next = services.gateSettings?.applyFor(deviceId, threshold, minFrames);
-          if (next !== undefined) {
-            gateValues.probMin = next.probMin;
-            gateValues.minFrames = next.minFrames;
-          }
+        apply: async (threshold, minFrames) => {
+          await services.registry.saveCalibration(deviceId, threshold, minFrames);
+          gateValues.probMin = threshold;
+          gateValues.minFrames = minFrames;
         },
         notice: (message) => notice(message),
         speak: async (text) => {
