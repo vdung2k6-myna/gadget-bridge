@@ -19,14 +19,13 @@ import type { Capture, CapturedWindow } from "./capture.js";
 import { endPhase, startPhase, type PhaseExpectation } from "./phases.js";
 import { buildReport, type CalibrationReport } from "./report.js";
 
-export type PhaseName = "quiet" | "normal" | "loud" | "soft" | "one-word";
+export type PhaseName = "quiet" | "normal" | "loud" | "soft";
 
 const PHASES: ReadonlyArray<{ name: PhaseName; label: string; expect: PhaseExpectation }> = [
   { name: "quiet", label: "quiet", expect: "silence" },
   { name: "normal", label: "normal", expect: "speech" },
   { name: "loud", label: "loud", expect: "speech" },
   { name: "soft", label: "soft", expect: "speech" },
-  { name: "one-word", label: "one-word", expect: "speech" },
 ];
 
 /**
@@ -40,8 +39,6 @@ const QUIET_MS = 60_000;
 /** How long a speech phase keeps listening, and how long the yes/no answer is awaited. */
 const PHASE_MS = 60_000;
 const ANSWER_MS = 20_000;
-/** A single word is shorter than the endpointer needs; the phase is shorter too. */
-const ONE_WORD_MS = 20_000;
 
 /** A window below this probability is room, not a sample, even if it is the best heard. */
 const SCORE_FLOOR = 0.2;
@@ -63,7 +60,6 @@ const TEXTS: Record<TurnLanguage, Texts> = {
       normal: "Bây giờ nói vài câu bình thường trong khoảng sáu mươi giây, ngắt một chút giữa các câu.",
       loud: "Nói vài câu to hơn một chút trong khoảng sáu mươi giây, ngắt một chút giữa các câu.",
       soft: "Nói vài câu nhỏ, như từ cuối phòng, trong khoảng sáu mươi giây, ngắt một chút giữa các câu.",
-      "one-word": "Bây giờ chỉ nói một từ, ví dụ ừ — nói hai hoặc ba lần, ngắt một chút giữa các lần.",
     },
     summary: (report) => {
       const recommendation = report.recommendation;
@@ -81,7 +77,6 @@ const TEXTS: Record<TurnLanguage, Texts> = {
       normal: "Talk normally for about sixty seconds — a few sentences, with a short pause between them.",
       loud: "Talk a little louder for about sixty seconds — a few sentences, pausing briefly between them.",
       soft: "Talk softly, as if from across the room, for about sixty seconds — a few sentences, pausing between them.",
-      "one-word": "Now say just one word, like 'ừ' — two or three times, with a small gap between them.",
     },
     summary: (report) => {
       const recommendation = report.recommendation;
@@ -129,8 +124,6 @@ export interface SessionDeps {
   phaseMs?: number;
   /** How long the yes/no answer is awaited. */
   answerMs?: number;
-  /** How long the one-word phase listens. */
-  oneWordMs?: number;
   /** The probability below which a window is room, not a sample. */
   scoreFloor?: number;
   /** The report, for a test that does not want to run the model; production uses the capture. */
@@ -158,7 +151,6 @@ export function createSession(deps: SessionDeps): Session {
   const quietMs = deps.quietMs ?? QUIET_MS;
   const phaseMs = deps.phaseMs ?? PHASE_MS;
   const answerMs = deps.answerMs ?? ANSWER_MS;
-  const oneWordMs = deps.oneWordMs ?? ONE_WORD_MS;
   const scoreFloor = deps.scoreFloor ?? SCORE_FLOOR;
   const texts = TEXTS[deps.language];
 
@@ -265,7 +257,7 @@ export function createSession(deps: SessionDeps): Session {
             let accepted = 0;
             const transcripts: Array<Promise<void>> = [];
             collecting = true;
-            const phaseLength = phase.name === "one-word" ? oneWordMs : phaseMs;
+            const phaseLength = phaseMs;
             const until = Date.now() + phaseLength;
             try {
               while (!stopped) {

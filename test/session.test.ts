@@ -114,7 +114,6 @@ describe("the spoken session", () => {
       minFrames: 3,
       quietMs: 5,
       phaseMs: 50,
-      oneWordMs: 20,
       answerMs: 50,
       speak: async (text) => {
         spoken.push(text);
@@ -158,7 +157,6 @@ describe("the spoken session", () => {
       minFrames: 3,
       quietMs: 5,
       phaseMs: 50,
-      oneWordMs: 20,
       answerMs: 50,
       speak: async (text) => {
         spoken.push(text);
@@ -198,7 +196,6 @@ describe("the spoken session", () => {
       minFrames: 3,
       quietMs: 5,
       phaseMs: 20,
-      oneWordMs: 20,
       answerMs: 20,
       speak: async (text) => {
         spoken.push(text);
@@ -234,7 +231,6 @@ describe("the spoken session", () => {
       minFrames: 3,
       quietMs: 5,
       phaseMs: 20,
-      oneWordMs: 20,
       answerMs: 20,
       speak: async () => {},
       transcribe: async () => null,
